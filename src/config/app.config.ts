@@ -8,12 +8,12 @@ export default () => ({
   },
   telemetry: {
     generationIntervalMs:
-      parseInt(process.env.TELEMETRY_INTERVAL ?? '2000', 10) || 2000,
+      parseInt(process.env.TELEMETRY_INTERVAL ?? '4000', 10) || 4000,
     burstSize: parseInt(process.env.TELEMETRY_BURST ?? '5', 10) || 5,
   },
   anomaly: {
     detectionIntervalMs:
-      parseInt(process.env.ANOMALY_INTERVAL ?? '5000', 10) || 5000,
+      parseInt(process.env.ANOMALY_INTERVAL ?? '30000', 10) || 30000,
     suspiciousThreshold: 3,
   },
   policy: {
