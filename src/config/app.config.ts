@@ -34,11 +34,6 @@ export default () => ({
     telemetryEnabled: process.env.ISTIO_TELEMETRY_ENABLED !== 'false',
   },
 
-  // Telemetry (deprecated - now using real Istio data)
-  telemetry: {
-    source: process.env.TELEMETRY_SOURCE || 'istio', // 'istio' or 'synthetic' (for testing)
-  },
-
   // Anomaly Detection
   anomaly: {
     detectionIntervalMs:
