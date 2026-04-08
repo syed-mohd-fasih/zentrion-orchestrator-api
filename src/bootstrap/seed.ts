@@ -1,195 +1,84 @@
-/* eslint-disable @typescript-eslint/no-unsafe-call */
-/* eslint-disable @typescript-eslint/no-unsafe-assignment */
 import { INestApplication, Logger } from '@nestjs/common';
-import { store } from '../common/store';
-import { User, ServiceInfo } from '../common/types';
-import { v4 as uuidv4 } from 'uuid';
-// import { TelemetryService } from '../modules/telemetry/telemetry.service';
-import { AnomalyService } from '../modules/anomaly/anomaly.service';
-import { PolicyService } from '../modules/policy/policy.service';
-import { TelemetryGateway } from '../modules/telemetry/telemetry.gateway';
+import { DataSource } from 'typeorm';
+import { User } from '../modules/database/entities/user.entity';
+import * as bcrypt from 'bcrypt';
 
 const logger = new Logger('SeedData');
 
-// eslint-disable-next-line @typescript-eslint/require-await
+/**
+ * Seed initial data into database
+ * Called during application bootstrap
+ */
 export async function seedData(app: INestApplication) {
   logger.log('Seeding initial data...');
 
-  // Seed users
-  seedUsers();
+  try {
+    const dataSource = app.get(DataSource);
 
-  // Seed services
-  seedServices();
+    // Wait for database connection
+    if (!dataSource.isInitialized) {
+      await dataSource.initialize();
+    }
 
-  // Wire up event emitters
-  wireEventEmitters(app);
+    // Seed users
+    await seedUsers(dataSource);
 
-  logger.log('✅ Seed data complete');
+    logger.log('✅ Seed data complete');
+  } catch (error) {
+    logger.error(`Failed to seed data: ${error.message}`);
+    throw error;
+  }
 }
 
-function seedUsers() {
-  const users: User[] = [
+/**
+ * Seed default users
+ */
+async function seedUsers(dataSource: DataSource) {
+  const userRepository = dataSource.getRepository(User);
+
+  const users = [
     {
-      id: uuidv4(),
       username: 'admin',
-      password: 'admin123', // In production: bcrypt.hash()
+      password: 'admin123',
       role: 'ADMIN',
       email: 'admin@zentrion.io',
-      createdAt: new Date().toISOString(),
     },
     {
-      id: uuidv4(),
       username: 'analyst',
       password: 'analyst123',
       role: 'ANALYST',
       email: 'analyst@zentrion.io',
-      createdAt: new Date().toISOString(),
     },
     {
-      id: uuidv4(),
       username: 'viewer',
       password: 'viewer123',
       role: 'VIEWER',
       email: 'viewer@zentrion.io',
-      createdAt: new Date().toISOString(),
     },
   ];
 
-  users.forEach((user) => {
-    store.addUser(user);
-    logger.log(`👤 User created: ${user.username} (${user.role})`);
-  });
-}
+  for (const userData of users) {
+    // Check if user already exists
+    const existing = await userRepository.findOne({
+      where: { username: userData.username },
+    });
 
-function seedServices() {
-  const services: ServiceInfo[] = [
-    {
-      name: 'frontend',
-      namespace: 'default',
-      requestsPerSecond: 0,
-      errorRate: 0,
-      avgLatency: 0,
-      lastSeen: new Date().toISOString(),
-      dependencies: ['api-gateway'],
-      labels: {
-        app: 'frontend',
-        version: 'v1',
-        tier: 'frontend',
-      },
-    },
-    {
-      name: 'api-gateway',
-      namespace: 'default',
-      requestsPerSecond: 0,
-      errorRate: 0,
-      avgLatency: 0,
-      lastSeen: new Date().toISOString(),
-      dependencies: ['auth-service', 'payment-service', 'inventory-service'],
-      labels: {
-        app: 'api-gateway',
-        version: 'v1',
-        tier: 'gateway',
-      },
-    },
-    {
-      name: 'auth-service',
-      namespace: 'default',
-      requestsPerSecond: 0,
-      errorRate: 0,
-      avgLatency: 0,
-      lastSeen: new Date().toISOString(),
-      dependencies: [],
-      labels: {
-        app: 'auth-service',
-        version: 'v1',
-        tier: 'backend',
-      },
-    },
-    {
-      name: 'payment-service',
-      namespace: 'default',
-      requestsPerSecond: 0,
-      errorRate: 0,
-      avgLatency: 0,
-      lastSeen: new Date().toISOString(),
-      dependencies: ['billing-service'],
-      labels: {
-        app: 'payment-service',
-        version: 'v1',
-        tier: 'backend',
-      },
-    },
-    {
-      name: 'billing-service',
-      namespace: 'default',
-      requestsPerSecond: 0,
-      errorRate: 0,
-      avgLatency: 0,
-      lastSeen: new Date().toISOString(),
-      dependencies: [],
-      labels: {
-        app: 'billing-service',
-        version: 'v1',
-        tier: 'backend',
-      },
-    },
-    {
-      name: 'inventory-service',
-      namespace: 'default',
-      requestsPerSecond: 0,
-      errorRate: 0,
-      avgLatency: 0,
-      lastSeen: new Date().toISOString(),
-      dependencies: ['notification-service'],
-      labels: {
-        app: 'inventory-service',
-        version: 'v1',
-        tier: 'backend',
-      },
-    },
-    {
-      name: 'notification-service',
-      namespace: 'default',
-      requestsPerSecond: 0,
-      errorRate: 0,
-      avgLatency: 0,
-      lastSeen: new Date().toISOString(),
-      dependencies: [],
-      labels: {
-        app: 'notification-service',
-        version: 'v1',
-        tier: 'backend',
-      },
-    },
-  ];
+    if (!existing) {
+      const user = new User();
+      user.username = userData.username;
 
-  services.forEach((service) => {
-    store.setService(service);
-    logger.log(`🔧 Service registered: ${service.name}`);
-  });
-}
+      // Hash password
+      const salt = await bcrypt.genSalt(10);
+      user.passwordHash = await bcrypt.hash(userData.password, salt);
 
-function wireEventEmitters(app: INestApplication) {
-  // Get service instances
-  const telemetryGateway = app.get(TelemetryGateway);
-  const anomalyService = app.get(AnomalyService);
-  const policyService = app.get(PolicyService);
+      user.role = userData.role;
+      user.email = userData.email;
 
-  // Wire anomaly service to emit through gateway
-  anomalyService.setEventEmitter((event: string, data: any) => {
-    if (event === 'anomaly.created') {
-      telemetryGateway.emitAnomaly(data);
+      await userRepository.save(user);
+
+      logger.log(`👤 User created: ${userData.username} (${userData.role})`);
+    } else {
+      logger.log(`👤 User already exists: ${userData.username}`);
     }
-  });
-
-  // Wire policy service to emit through gateway
-  policyService.setEventEmitter((event: string, data: any) => {
-    if (event === 'policy.draft') {
-      telemetryGateway.emitPolicyDraft(data);
-    } else if (event === 'policy.applied') {
-      telemetryGateway.emitPolicyApplied(data);
-    }
-  });
-
-  logger.log('🔌 Event emitters wired');
+  }
 }
