@@ -1,4 +1,4 @@
-import { Controller, Get, Query, UseGuards } from '@nestjs/common';
+import { Controller, Get, Param, Query, UseGuards } from '@nestjs/common';
 import { TelemetryService } from './telemetry.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 
@@ -8,30 +8,29 @@ export class TelemetryController {
   constructor(private telemetryService: TelemetryService) {}
 
   @Get('live')
-  getLiveLogs(
+  async getLiveLogs(
     @Query('limit') limit?: string,
     @Query('service') service?: string,
   ) {
     const parsedLimit = limit ? parseInt(limit, 10) : 100;
     return {
-      logs: this.telemetryService.getLogs(parsedLimit, service),
+      logs: await this.telemetryService.getLogs(parsedLimit, service),
       timestamp: new Date().toISOString(),
     };
   }
 
   @Get('services')
-  getServices() {
+  async getServices() {
     return {
-      services: this.telemetryService.getServices(),
+      services: await this.telemetryService.getServices(),
       timestamp: new Date().toISOString(),
     };
   }
 
   @Get('services/:name')
-  getService(@Query('name') name: string) {
-    const service = this.telemetryService.getService(name);
+  async getService(@Param('name') name: string) {
     return {
-      service,
+      service: await this.telemetryService.getService(name),
       timestamp: new Date().toISOString(),
     };
   }
