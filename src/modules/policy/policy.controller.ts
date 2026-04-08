@@ -17,7 +17,6 @@ import {
   RejectPolicyDto,
   GeneratePolicyFromAnomalyDto,
 } from './policy.dto';
-import { store } from '../../common/store';
 
 @Controller('policies')
 @UseGuards(JwtAuthGuard)
@@ -25,32 +24,49 @@ export class PolicyController {
   constructor(private policyService: PolicyService) {}
 
   @Get('active')
-  getActivePolicies() {
+  async getActivePolicies() {
     return {
-      policies: this.policyService.getActivePolicies(),
-      timestamp: new Date().toISOString(),
-    };
-  }
-
-  @Get('drafts')
-  getAllDrafts() {
-    return {
-      drafts: this.policyService.getAllDrafts(),
+      policies: await this.policyService.getActivePolicies(),
       timestamp: new Date().toISOString(),
     };
   }
 
   @Get('drafts/pending')
-  getPendingDrafts() {
+  async getPendingDrafts() {
     return {
-      drafts: this.policyService.getPendingDrafts(),
+      drafts: await this.policyService.getPendingDrafts(),
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  @Get('drafts')
+  async getAllDrafts() {
+    return {
+      drafts: await this.policyService.getAllDrafts(),
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  @Get('history')
+  async getPolicyHistory() {
+    return {
+      history: await this.policyService.getHistory(),
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  @Get('history/:policyId')
+  async getPolicyHistoryById(@Param('policyId') policyId: string) {
+    return {
+      history: await this.policyService.getHistory(policyId),
+      policyId,
       timestamp: new Date().toISOString(),
     };
   }
 
   @Get('drafts/:id')
-  getDraft(@Param('id') id: string) {
-    const draft = this.policyService.getDraft(id);
+  async getDraft(@Param('id') id: string) {
+    const draft = await this.policyService.getDraft(id);
     if (!draft) {
       throw new NotFoundException(`Policy draft ${id} not found`);
     }
@@ -63,10 +79,10 @@ export class PolicyController {
   @Post('drafts')
   @UseGuards(RolesGuard)
   @Roles('ADMIN', 'ANALYST')
-  createDraft(@Body() dto: CreatePolicyDraftDto, @Request() req) {
-    const draft = this.policyService.createDraft({
+  async createDraft(@Body() dto: CreatePolicyDraftDto, @Request() req) {
+    const draft = await this.policyService.createDraft({
       ...dto,
-      userId: req.user.id,
+      userId: req.user.id as string,
     });
     return {
       draft,
@@ -77,18 +93,13 @@ export class PolicyController {
   @Post('drafts/from-anomaly')
   @UseGuards(RolesGuard)
   @Roles('ADMIN', 'ANALYST')
-  generateFromAnomaly(
+  async generateFromAnomaly(
     @Body() dto: GeneratePolicyFromAnomalyDto,
     @Request() req,
   ) {
-    const anomaly = store.getAnomaly(dto.anomalyId);
-    if (!anomaly) {
-      throw new NotFoundException(`Anomaly ${dto.anomalyId} not found`);
-    }
-
-    const draft = this.policyService.generatePolicyFromAnomaly(
-      anomaly,
-      req.user.id,
+    const draft = await this.policyService.generatePolicyFromAnomaly(
+      dto.anomalyId,
+      req.user.id as string,
     );
     return {
       draft,
@@ -101,10 +112,10 @@ export class PolicyController {
   @Roles('ADMIN')
   async approveDraft(
     @Param('id') id: string,
-    @Body() dto: ApprovePolicyDto,
+    @Body() _dto: ApprovePolicyDto,
     @Request() req,
   ) {
-    const draft = await this.policyService.approveDraft(id, req.user.id);
+    const draft = await this.policyService.approveDraft(id, req.user.id as string);
     return {
       draft,
       message: 'Policy approved and applied successfully',
@@ -114,32 +125,15 @@ export class PolicyController {
   @Post('drafts/:id/reject')
   @UseGuards(RolesGuard)
   @Roles('ADMIN', 'ANALYST')
-  rejectDraft(
+  async rejectDraft(
     @Param('id') id: string,
     @Body() dto: RejectPolicyDto,
     @Request() req,
   ) {
-    const draft = this.policyService.rejectDraft(id, req.user.id, dto.reason);
+    const draft = await this.policyService.rejectDraft(id, req.user.id as string, dto.reason);
     return {
       draft,
       message: 'Policy rejected',
-    };
-  }
-
-  @Get('history')
-  getPolicyHistory() {
-    return {
-      history: this.policyService.getHistory(),
-      timestamp: new Date().toISOString(),
-    };
-  }
-
-  @Get('history/:policyId')
-  getPolicyHistoryById(@Param('policyId') policyId: string) {
-    return {
-      history: this.policyService.getHistory(policyId),
-      policyId,
-      timestamp: new Date().toISOString(),
     };
   }
 }
