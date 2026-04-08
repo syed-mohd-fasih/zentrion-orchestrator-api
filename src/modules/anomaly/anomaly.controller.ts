@@ -8,28 +8,27 @@ export class AnomalyController {
   constructor(private anomalyService: AnomalyService) {}
 
   @Get()
-  getAllAnomalies(@Query('limit') limit?: string) {
+  async getAllAnomalies(@Query('limit') limit?: string) {
     const parsedLimit = limit ? parseInt(limit, 10) : undefined;
     return {
-      anomalies: this.anomalyService.getAllAnomalies(parsedLimit),
-      timestamp: new Date().toISOString(),
-    };
-  }
-
-  @Get(':id')
-  getAnomaly(@Param('id') id: string) {
-    const anomaly = this.anomalyService.getAnomaly(id);
-    return {
-      anomaly,
+      anomalies: await this.anomalyService.getAllAnomalies(parsedLimit),
       timestamp: new Date().toISOString(),
     };
   }
 
   @Get('service/:service')
-  getAnomaliesByService(@Param('service') service: string) {
+  async getAnomaliesByService(@Param('service') service: string) {
     return {
-      anomalies: this.anomalyService.getAnomaliesByService(service),
+      anomalies: await this.anomalyService.getAnomaliesByService(service),
       service,
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  @Get(':id')
+  async getAnomaly(@Param('id') id: string) {
+    return {
+      anomaly: await this.anomalyService.getAnomaly(id),
       timestamp: new Date().toISOString(),
     };
   }
