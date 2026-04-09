@@ -4,53 +4,41 @@ FROM node:18-alpine AS builder
 WORKDIR /app
 
 # Copy package files
-COPY package.json pnpm-lock.yaml ./
+# package-lock.json instead of pnpm-lock.yaml
+COPY package.json package-lock.json ./
 
-# Install pnpm
-RUN npm install -g pnpm
+# No pnpm installation needed - npm comes with Node
 
-# Install dependencies
-RUN pnpm install --frozen-lockfile
+# npm ci is the production-safe equivalent of pnpm install --frozen-lockfile
+# It strictly installs from package-lock.json and fails if there's a mismatch
+RUN npm ci
 
-# Copy source code
 COPY . .
 
-# Build application
-RUN pnpm build
+RUN npm run build
 
 # Production stage
 FROM node:18-alpine
 
 WORKDIR /app
 
-# Install pnpm
-RUN npm install -g pnpm
+COPY package.json package-lock.json ./
 
-# Copy package files
-COPY package.json pnpm-lock.yaml ./
+# --omit=dev is npm's equivalent of pnpm install --prod
+RUN npm ci --omit=dev
 
-# Install production dependencies only
-RUN pnpm install --prod --frozen-lockfile
-
-# Copy built application from builder
 COPY --from=builder /app/dist ./dist
 
-# Create non-root user
 RUN addgroup -g 1000 zentrion && \
     adduser -u 1000 -G zentrion -s /bin/sh -D zentrion
 
-# Change ownership
 RUN chown -R zentrion:zentrion /app
 
-# Switch to non-root user
 USER zentrion
 
-# Expose port
 EXPOSE 3001
 
-# Health check
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD node -e "require('http').get('http://localhost:3001/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"
 
-# Start application
 CMD ["node", "dist/main.js"]
