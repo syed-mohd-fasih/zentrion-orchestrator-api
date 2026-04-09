@@ -1,6 +1,6 @@
 export default () => ({
   // Server
-  port: parseInt(process.env.PORT, 10) || 3001,
+  port: parseInt(process.env.PORT ?? '', 10) || 3001,
   nodeEnv: process.env.NODE_ENV || 'development',
 
   // JWT
@@ -14,7 +14,7 @@ export default () => ({
   // Database (PostgreSQL)
   database: {
     host: process.env.DB_HOST || 'localhost',
-    port: parseInt(process.env.DB_PORT, 10) || 5432,
+    port: parseInt(process.env.DB_PORT ?? '', 10) || 5432,
     username: process.env.DB_USER || 'zentrion',
     password: process.env.DB_PASSWORD || 'zentrion',
     database: process.env.DB_NAME || 'zentrion',
@@ -37,10 +37,10 @@ export default () => ({
   // Anomaly Detection
   anomaly: {
     detectionIntervalMs:
-      parseInt(process.env.ANOMALY_DETECTION_INTERVAL_MS, 10) || 5000,
+      parseInt(process.env.ANOMALY_DETECTION_INTERVAL_MS ?? '', 10) || 5000,
     enabled: process.env.ANOMALY_DETECTION_ENABLED !== 'false',
     suspiciousThreshold:
-      parseInt(process.env.ANOMALY_SUSPICIOUS_THRESHOLD, 10) || 3,
+      parseInt(process.env.ANOMALY_SUSPICIOUS_THRESHOLD ?? '', 10) || 3,
   },
 
   // Policy
