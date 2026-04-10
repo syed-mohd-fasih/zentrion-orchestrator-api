@@ -29,8 +29,8 @@ RUN npm ci --omit=dev
 
 COPY --from=builder /app/dist ./dist
 
-RUN addgroup -g 1000 zentrion && \
-    adduser -u 1000 -G zentrion -s /bin/sh -D zentrion
+RUN addgroup -g 1001 zentrion && \
+    adduser -u 1001 -G zentrion -s /bin/sh -D zentrion
 
 RUN chown -R zentrion:zentrion /app
 
