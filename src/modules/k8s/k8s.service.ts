@@ -323,7 +323,9 @@ export class K8sService implements OnModuleInit {
   async getNamespaces(): Promise<string[]> {
     try {
       const response = await this.k8sApi.listNamespace();
-      return response.body.items.map((ns) => ns.metadata.name);
+      return response.body.items
+        .filter((ns) => ns.metadata?.name)
+        .map((ns) => ns.metadata!.name!);
     } catch (error) {
       this.logger.error(`Failed to list namespaces: ${error.message}`);
       return [];

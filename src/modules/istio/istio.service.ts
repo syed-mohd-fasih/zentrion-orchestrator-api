@@ -91,11 +91,11 @@ export class IstioService implements OnModuleInit, OnModuleDestroy {
 
       // Watch each pod's istio-proxy container logs
       for (const pod of pods) {
-        const podName = pod.metadata.name;
-        
+        const podName = pod.metadata?.name;
+
         // Skip pods that don't have istio-proxy container
-        const hasProxy = pod.spec.containers.some((c) => c.name === 'istio-proxy');
-        if (!hasProxy) continue;
+        const hasProxy = pod.spec?.containers.some((c) => c.name === 'istio-proxy');
+        if (!hasProxy || !podName) continue;
 
         await this.watchPodLogs(namespace, podName, kc);
       }
