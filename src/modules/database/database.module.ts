@@ -27,7 +27,7 @@ import { User } from './entities/user.entity';
           Service,
           User,
         ],
-        synchronize: true, // Auto-create tables on startup
+        synchronize: config.get('DB_SYNC', 'false') === 'true',
         logging: config.get('DB_LOGGING', false),
         ssl: config.get('DB_SSL', false),
       }),
