@@ -4,16 +4,15 @@ import { Entity, Column, PrimaryGeneratedColumn, CreateDateColumn, Index } from 
 @Index(['service'])
 @Index(['timestamp'])
 @Index(['status'])
+@Index(['source'])
 export class TelemetryLog {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
   @Column({ type: 'timestamptz' })
-  @Index()
   timestamp: Date;
 
   @Column({ type: 'varchar', length: 255 })
-  @Index()
   source: string;
 
   @Column({ type: 'inet' })
@@ -26,14 +25,12 @@ export class TelemetryLog {
   path: string;
 
   @Column({ type: 'integer' })
-  @Index()
   status: number;
 
   @Column({ type: 'integer' })
   latencyMs: number;
 
   @Column({ type: 'varchar', length: 255 })
-  @Index()
   service: string;
 
   @Column({ type: 'varchar', length: 255, nullable: true })

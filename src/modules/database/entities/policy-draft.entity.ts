@@ -12,14 +12,12 @@ export class PolicyDraft {
   draftId: string;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  @Index()
   createdAt: Date;
 
   @Column({ type: 'varchar', length: 255 })
   createdBy: string;
 
   @Column({ type: 'varchar', length: 255 })
-  @Index()
   service: string;
 
   @Column({ type: 'varchar', length: 255, default: 'default' })
@@ -29,7 +27,6 @@ export class PolicyDraft {
   yamlContent: string;
 
   @Column({ type: 'varchar', length: 50, default: 'pending' })
-  @Index()
   status: string;
 
   @Column({ type: 'text' })

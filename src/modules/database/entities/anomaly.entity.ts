@@ -13,19 +13,15 @@ export class Anomaly {
   anomalyId: string;
 
   @Column({ type: 'timestamptz' })
-  @Index()
   timestamp: Date;
 
   @Column({ type: 'varchar', length: 255 })
-  @Index()
   service: string;
 
   @Column({ type: 'varchar', length: 100 })
-  @Index()
   type: string;
 
   @Column({ type: 'varchar', length: 20 })
-  @Index()
   severity: string;
 
   @Column({ type: 'text' })

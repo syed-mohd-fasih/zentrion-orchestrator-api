@@ -11,7 +11,6 @@ export class Service {
   name: string;
 
   @Column({ type: 'varchar', length: 255 })
-  @Index()
   namespace: string;
 
   @Column({ type: 'jsonb', nullable: true })

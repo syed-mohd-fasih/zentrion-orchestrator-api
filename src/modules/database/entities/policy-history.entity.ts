@@ -8,14 +8,12 @@ export class PolicyHistory {
   id: string;
 
   @Column({ type: 'varchar', length: 255 })
-  @Index()
   policyId: string;
 
   @Column({ type: 'varchar', length: 50 })
   action: string;
 
   @Column({ type: 'timestamptz', default: () => 'CURRENT_TIMESTAMP' })
-  @Index()
   timestamp: Date;
 
   @Column({ type: 'varchar', length: 255 })
