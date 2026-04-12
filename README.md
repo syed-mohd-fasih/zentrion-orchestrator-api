@@ -432,13 +432,10 @@ src/
 │   │   ├── policy.service.ts
 │   │   ├── policy.controller.ts
 │   │   └── policy.dto.ts
-│   ├── k8s/                     # Kubernetes mock
-│   │   ├── k8s.module.ts
-│   │   ├── k8s.service.ts
-│   │   └── istio.builder.ts
-│   └── events/                  # Event handling
-│       ├── events.module.ts
-│       └── events.service.ts
+│   └── k8s/                     # Kubernetes mock
+│       ├── k8s.module.ts
+│       ├── k8s.service.ts
+│       └── istio.builder.ts
 └── bootstrap/
     └── seed.ts                  # Initial data seeding
 ```
