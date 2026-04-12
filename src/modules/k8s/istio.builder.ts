@@ -86,6 +86,16 @@ export function buildPeerAuthentication(
 }
 
 /**
+ * Check if a YAML string value needs quoting to avoid misinterpretation
+ */
+function needsQuoting(value: string): boolean {
+  const yamlBooleans = ['true', 'false', 'yes', 'no', 'on', 'off', 'null'];
+  if (yamlBooleans.includes(value.toLowerCase())) return true;
+  if (/^\d+(\.\d+)?$/.test(value)) return true;
+  return false;
+}
+
+/**
  * Simple YAML converter (for demonstration)
  * In production, use a proper YAML library like js-yaml
  */
@@ -110,6 +120,8 @@ function convertToYAML(obj: any, indent = 0): string {
             yaml += `${indentStr}- `;
             const itemYaml = convertToYAML(item, indent + 1);
             yaml += itemYaml.substring(indentStr.length + 2);
+          } else if (typeof item === 'string' && needsQuoting(item)) {
+            yaml += `${indentStr}- "${item}"\n`;
           } else {
             yaml += `${indentStr}- ${item}\n`;
           }
@@ -117,6 +129,8 @@ function convertToYAML(obj: any, indent = 0): string {
       }
     } else if (typeof value === 'object') {
       yaml += '\n' + convertToYAML(value, indent + 1);
+    } else if (typeof value === 'string' && needsQuoting(value)) {
+      yaml += ` "${value}"\n`;
     } else {
       yaml += ` ${value}\n`;
     }

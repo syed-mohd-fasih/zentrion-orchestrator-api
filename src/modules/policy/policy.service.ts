@@ -110,7 +110,7 @@ export class PolicyService {
     await this.draftRepo.save(draft);
 
     await this.addHistory(draftId, 'approved', userId, 'Policy approved');
-    await this.addHistory(draftId, 'applied', userId, `Applied to cluster: ${result.id}`);
+    await this.addHistory(draftId, 'applied', userId, `Applied to cluster: ${result.name}`);
 
     if (this.eventEmitter) {
       this.eventEmitter('policy.applied', draft);

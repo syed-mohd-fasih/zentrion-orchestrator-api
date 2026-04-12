@@ -40,7 +40,7 @@ export class AuthController {
   @Get('me')
   @UseGuards(JwtAuthGuard)
   async getProfile(@Request() req) {
-    const { password, ...userWithoutPassword } = req.user;
+    const { passwordHash, ...userWithoutPassword } = req.user;
     return {
       user: userWithoutPassword,
     };

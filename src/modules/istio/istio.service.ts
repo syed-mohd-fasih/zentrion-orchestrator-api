@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { K8sService } from '../k8s/k8s.service';
 import * as k8s from '@kubernetes/client-node';
 import { EventEmitter2 } from '@nestjs/event-emitter';
+import { PassThrough } from 'stream';
 
 /**
  * Istio Telemetry Service
@@ -75,27 +76,21 @@ export class IstioService implements OnModuleInit, OnModuleDestroy {
       const k8sApi = this.k8sService.getK8sApi();
       const kc = this.k8sService.getKubeConfig();
 
-      // Get all pods with Istio sidecar in this namespace
-      const podsResponse = await k8sApi.listNamespacedPod(
-        namespace,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        'istio-injection=enabled', // Only pods with sidecar
-      );
+      // Get all pods in this namespace and filter for Istio sidecar
+      const podsResponse = await k8sApi.listNamespacedPod(namespace);
 
-      const pods = podsResponse.body.items;
+      const pods = podsResponse.body.items.filter((pod) => {
+        const hasProxy = pod.spec?.containers?.some((c) => c.name === 'istio-proxy');
+        const isRunning = pod.status?.phase === 'Running';
+        return hasProxy && isRunning;
+      });
 
       this.logger.log(`Found ${pods.length} pods with Istio sidecar in namespace ${namespace}`);
 
       // Watch each pod's istio-proxy container logs
       for (const pod of pods) {
         const podName = pod.metadata?.name;
-
-        // Skip pods that don't have istio-proxy container
-        const hasProxy = pod.spec?.containers.some((c) => c.name === 'istio-proxy');
-        if (!hasProxy || !podName) continue;
+        if (!podName) continue;
 
         await this.watchPodLogs(namespace, podName, kc);
       }
@@ -114,29 +109,36 @@ export class IstioService implements OnModuleInit, OnModuleDestroy {
   private async watchPodLogs(namespace: string, podName: string, kc: k8s.KubeConfig) {
     const streamKey = `${namespace}/${podName}`;
 
+    // Don't re-watch if already streaming
+    if (this.logStreams.has(streamKey)) return;
+
     try {
-      const logStream = new k8s.Log(kc);
-      
-      const stream = await logStream.log(
+      const logApi = new k8s.Log(kc);
+
+      // Use a PassThrough stream to capture log output
+      const passThrough = new PassThrough();
+
+      await logApi.log(
         namespace,
         podName,
-        'istio-proxy', // Envoy sidecar container
-        process.stdout, // We'll intercept this
+        'istio-proxy',
+        passThrough,
         (err) => {
           if (err) {
-            this.logger.error(`Log stream error for ${streamKey}: ${err.message}`);
+            this.logger.error(`Log stream error for ${streamKey}: ${err.message || err}`);
+            this.logStreams.delete(streamKey);
           }
         },
         { follow: true, tailLines: 0, pretty: false, timestamps: false },
       );
 
-      // Parse and emit log lines
+      // Parse and emit log lines from the PassThrough stream
       let buffer = '';
-      
-      stream.on('data', (chunk: Buffer) => {
+
+      passThrough.on('data', (chunk: Buffer) => {
         buffer += chunk.toString();
         const lines = buffer.split('\n');
-        buffer = lines.pop() || ''; // Keep incomplete line in buffer
+        buffer = lines.pop() || '';
 
         for (const line of lines) {
           if (line.trim()) {
@@ -145,21 +147,21 @@ export class IstioService implements OnModuleInit, OnModuleDestroy {
         }
       });
 
-      stream.on('error', (err) => {
+      passThrough.on('error', (err) => {
         this.logger.error(`Stream error for ${streamKey}: ${err.message}`);
         this.logStreams.delete(streamKey);
       });
 
-      stream.on('close', () => {
+      passThrough.on('close', () => {
         this.logger.debug(`Stream closed for ${streamKey}`);
         this.logStreams.delete(streamKey);
       });
 
-      this.logStreams.set(streamKey, stream);
+      this.logStreams.set(streamKey, passThrough);
       this.logger.debug(`Started watching logs for ${streamKey}`);
 
     } catch (error) {
-      this.logger.error(`Failed to watch logs for ${streamKey}: ${error.message}`);
+      this.logger.error(`Failed to watch logs for ${streamKey}: ${error?.message || error}`);
     }
   }
 
@@ -235,7 +237,7 @@ export class IstioService implements OnModuleInit, OnModuleDestroy {
         {},
         (type, pod: k8s.V1Pod) => {
           if (type === 'ADDED' || type === 'MODIFIED') {
-            const hasProxy = pod.spec?.containers.some((c) => c.name === 'istio-proxy');
+            const hasProxy = pod.spec?.containers?.some((c) => c.name === 'istio-proxy');
             if (hasProxy && pod.status?.phase === 'Running') {
               const podName = pod.metadata?.name;
               if (podName && !this.logStreams.has(`${namespace}/${podName}`)) {

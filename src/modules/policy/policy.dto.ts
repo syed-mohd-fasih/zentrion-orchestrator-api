@@ -3,9 +3,7 @@ import {
   IsNotEmpty,
   IsArray,
   IsOptional,
-  ValidateNested,
 } from 'class-validator';
-import { Type } from 'class-transformer';
 import { AuthorizationRule } from '../../common/types';
 
 export class CreatePolicyDraftDto {
@@ -18,8 +16,6 @@ export class CreatePolicyDraftDto {
   namespace: string;
 
   @IsArray()
-  @ValidateNested({ each: true })
-  @Type(() => Object)
   rules: AuthorizationRule[];
 
   @IsString()
