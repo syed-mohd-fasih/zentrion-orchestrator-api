@@ -4,7 +4,18 @@
 import { AuthorizationRule } from '../../common/types';
 
 /**
- * Build an Istio AuthorizationPolicy manifest
+ * Build an Istio `AuthorizationPolicy` YAML manifest.
+ *
+ * Generates a `DENY`-action policy targeting `app=<serviceName>` with a
+ * timestamped name (ensuring successive generations don't collide) and
+ * Zentrion provenance annotations so operators can tell which policies
+ * were auto-generated.
+ *
+ * @param serviceName Workload label (`app=<serviceName>`) the policy targets.
+ * @param namespace   Namespace the policy is scoped to.
+ * @param rules       Authorization rules (from/to/when) to compile into the manifest.
+ * @param description Optional human-readable description (annotation only).
+ * @returns YAML string ready to hand to `K8sService.applyManifest`.
  */
 export function buildAuthorizationPolicy(
   serviceName: string,
@@ -16,6 +27,7 @@ export function buildAuthorizationPolicy(
     apiVersion: 'security.istio.io/v1beta1',
     kind: 'AuthorizationPolicy',
     metadata: {
+      // Suffix with epoch-ms to avoid name collisions across generations.
       name: `${serviceName}-authz-${Date.now()}`,
       namespace,
       annotations: {
@@ -51,12 +63,18 @@ export function buildAuthorizationPolicy(
     },
   };
 
-  // Convert to YAML format
   return convertToYAML(manifest);
 }
 
 /**
- * Build a PeerAuthentication manifest
+ * Build an Istio `PeerAuthentication` YAML manifest.
+ *
+ * Controls mTLS enforcement for traffic reaching `app=<serviceName>`.
+ *
+ * @param serviceName Workload label (`app=<serviceName>`) the policy targets.
+ * @param namespace   Namespace the policy is scoped to.
+ * @param mtlsMode    mTLS enforcement mode. Defaults to `STRICT` (zero-trust).
+ * @returns YAML string ready to hand to `K8sService.applyManifest`.
  */
 export function buildPeerAuthentication(
   serviceName: string,
@@ -86,7 +104,14 @@ export function buildPeerAuthentication(
 }
 
 /**
- * Check if a YAML string value needs quoting to avoid misinterpretation
+ * Decide whether a scalar value needs quoting in YAML output.
+ *
+ * YAML parsers coerce certain unquoted tokens (`true`, `yes`, numbers, ...)
+ * to their typed value. When such a value is meant to stay a string — e.g.
+ * an HTTP method name or a port as string — it must be quoted.
+ *
+ * @param value Raw string to inspect.
+ * @returns `true` when the value must be double-quoted.
  */
 function needsQuoting(value: string): boolean {
   const yamlBooleans = ['true', 'false', 'yes', 'no', 'on', 'off', 'null'];
@@ -96,14 +121,23 @@ function needsQuoting(value: string): boolean {
 }
 
 /**
- * Simple YAML converter (for demonstration)
- * In production, use a proper YAML library like js-yaml
+ * Recursive object → YAML serializer.
+ *
+ * Intentionally minimal (no anchors, no flow style beyond empty arrays)
+ * because the output only needs to be consumed by `kubectl apply` via the
+ * `@kubernetes/client-node` client. For richer YAML needs, switch to
+ * `js-yaml`'s `dump`.
+ *
+ * @param obj    Object to serialize.
+ * @param indent Current indentation depth (2 spaces per level).
+ * @returns YAML text.
  */
 function convertToYAML(obj: any, indent = 0): string {
   const indentStr = '  '.repeat(indent);
   let yaml = '';
 
   for (const [key, value] of Object.entries(obj)) {
+    // Drop keys with no value — keeps the manifest clean and avoids YAML `null`s.
     if (value === undefined || value === null) {
       continue;
     }
@@ -119,6 +153,7 @@ function convertToYAML(obj: any, indent = 0): string {
           if (typeof item === 'object') {
             yaml += `${indentStr}- `;
             const itemYaml = convertToYAML(item, indent + 1);
+            // Drop the leading indent of the nested object so the `-` lines up.
             yaml += itemYaml.substring(indentStr.length + 2);
           } else if (typeof item === 'string' && needsQuoting(item)) {
             yaml += `${indentStr}- "${item}"\n`;

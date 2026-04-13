@@ -2,8 +2,17 @@ import { Injectable, Logger } from '@nestjs/common';
 import { K8sService } from '../k8s/k8s.service';
 
 /**
- * Zentrion CRD Management Service
- * Manages SecurityProfile, PolicyHistory, and AnomalyRecord CRDs
+ * Zentrion CRD management service.
+ *
+ * Provides CRUD helpers against the three `zentrion.io/v1alpha1` custom
+ * resources that live alongside the relational tables:
+ *  - `SecurityProfile` — per-service behavioural baseline + allowed peers.
+ *  - `AnomalyRecord`   — K8s-native mirror of the `anomalies` table.
+ *  - `PolicyHistory`   — K8s-native mirror of the `policy_history` table.
+ *
+ * Storing this state as CRDs lets operators inspect it with standard
+ * `kubectl` tooling and satisfies the FYP requirement of demonstrating
+ * K8s extension mechanisms (custom API groups).
  */
 @Injectable()
 export class CrdService {
@@ -16,7 +25,14 @@ export class CrdService {
   // ============================================
 
   /**
-   * Create or update SecurityProfile
+   * Create or update a `SecurityProfile` for a service.
+   *
+   * Seeded at service-discovery time with empty baselines and updated as
+   * telemetry accumulates. Uses a merge-patch on existing profiles so
+   * status fields set by controllers are preserved.
+   *
+   * @param profile Profile payload. `serviceName`+`namespace` identify the CR.
+   * @returns The created or patched resource body.
    */
   async upsertSecurityProfile(profile: {
     serviceName: string;
@@ -47,7 +63,6 @@ export class CrdService {
         },
       };
 
-      // Try to get existing
       const existing = await customApi
         .getNamespacedCustomObject(
           'zentrion.io',
@@ -59,7 +74,6 @@ export class CrdService {
         .catch(() => null);
 
       if (existing) {
-        // Update
         const result = await customApi.patchNamespacedCustomObject(
           'zentrion.io',
           'v1alpha1',
@@ -75,7 +89,6 @@ export class CrdService {
         this.logger.debug(`Updated SecurityProfile: ${serviceName}`);
         return result.body;
       } else {
-        // Create
         const result = await customApi.createNamespacedCustomObject(
           'zentrion.io',
           'v1alpha1',
@@ -93,7 +106,9 @@ export class CrdService {
   }
 
   /**
-   * Get SecurityProfile
+   * Fetch a single `SecurityProfile` by service + namespace.
+   *
+   * @returns The resource body, or `null` if it does not exist (404).
    */
   async getSecurityProfile(serviceName: string, namespace: string) {
     try {
@@ -116,12 +131,15 @@ export class CrdService {
   }
 
   /**
-   * List all SecurityProfiles
+   * List `SecurityProfile` resources.
+   *
+   * @param namespace Optional scope — if omitted, lists across the cluster.
+   * @returns Array of resources (empty on error — logs the failure).
    */
   async listSecurityProfiles(namespace?: string) {
     try {
       const customApi = this.k8sService.getCustomApi();
-      
+
       let result;
       if (namespace) {
         result = await customApi.listNamespacedCustomObject(
@@ -137,7 +155,7 @@ export class CrdService {
           'securityprofiles',
         );
       }
-      
+
       return (result.body as any).items || [];
     } catch (error) {
       this.logger.error(`Failed to list SecurityProfiles: ${error.message}`);
@@ -150,7 +168,12 @@ export class CrdService {
   // ============================================
 
   /**
-   * Create AnomalyRecord
+   * Create an `AnomalyRecord` mirroring a row from the `anomalies` table.
+   *
+   * The name is derived from the first 8 chars of the UUID — enough to
+   * disambiguate in practice while staying within K8s name length limits.
+   *
+   * @returns The created resource body.
    */
   async createAnomalyRecord(anomaly: {
     anomalyId: string;
@@ -204,7 +227,14 @@ export class CrdService {
   }
 
   /**
-   * Update AnomalyRecord status
+   * Patch the `status` subresource of an `AnomalyRecord`.
+   *
+   * Used when a generated policy is applied ("policyApplied: true") or when
+   * the state transitions to `resolved`.
+   *
+   * @param anomalyId UUID of the source anomaly.
+   * @param namespace Namespace the CR lives in.
+   * @param status    Fields to merge into the status subresource.
    */
   async updateAnomalyRecordStatus(
     anomalyId: string,
@@ -245,12 +275,14 @@ export class CrdService {
   }
 
   /**
-   * List AnomalyRecords
+   * List `AnomalyRecord` resources.
+   *
+   * @param namespace Optional namespace filter; omit for cluster-wide.
    */
   async listAnomalyRecords(namespace?: string) {
     try {
       const customApi = this.k8sService.getCustomApi();
-      
+
       let result;
       if (namespace) {
         result = await customApi.listNamespacedCustomObject(
@@ -266,7 +298,7 @@ export class CrdService {
           'anomalyrecords',
         );
       }
-      
+
       return (result.body as any).items || [];
     } catch (error) {
       this.logger.error(`Failed to list AnomalyRecords: ${error.message}`);
@@ -279,7 +311,12 @@ export class CrdService {
   // ============================================
 
   /**
-   * Create PolicyHistory entry
+   * Create a `PolicyHistory` entry recording a lifecycle action
+   * (created / approved / rejected / applied / deleted).
+   *
+   * All history resources are stored in `zentrion-system` (rather than the
+   * policy's target namespace) so the full audit trail lives in one place
+   * and can be queried regardless of where the policies were applied.
    */
   async createPolicyHistory(history: {
     policyId: string;
@@ -303,12 +340,13 @@ export class CrdService {
         apiVersion: 'zentrion.io/v1alpha1',
         kind: 'PolicyHistory',
         metadata: {
+          // Epoch suffix prevents name collisions on rapid successive actions.
           name: `history-${policyId.substring(0, 8)}-${Date.now()}`,
-          namespace: 'zentrion-system', // Store all history in zentrion-system
+          namespace: 'zentrion-system',
         },
         spec: {
           policyId,
-          namespace, // Target namespace
+          namespace, // Target namespace the policy applies to.
           ...spec,
         },
         status: {
@@ -334,25 +372,28 @@ export class CrdService {
   }
 
   /**
-   * List PolicyHistory
+   * List `PolicyHistory` entries — optionally filtered to a single policy.
+   *
+   * @param policyId Optional filter; returns only entries whose
+   *                 `spec.policyId` matches.
    */
   async listPolicyHistory(policyId?: string) {
     try {
       const customApi = this.k8sService.getCustomApi();
-      
+
       const result = await customApi.listNamespacedCustomObject(
         'zentrion.io',
         'v1alpha1',
         'zentrion-system',
         'policyhistories',
       );
-      
+
       let items = (result.body as any).items || [];
-      
+
       if (policyId) {
         items = items.filter((item: any) => item.spec.policyId === policyId);
       }
-      
+
       return items;
     } catch (error) {
       this.logger.error(`Failed to list PolicyHistory: ${error.message}`);

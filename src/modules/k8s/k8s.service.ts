@@ -4,8 +4,17 @@ import * as k8s from '@kubernetes/client-node';
 import * as yaml from 'js-yaml';
 
 /**
- * Real Kubernetes client service
- * Connects to cluster using in-cluster config or kubeconfig
+ * Real Kubernetes client service.
+ *
+ * Establishes a connection to the cluster on boot and exposes:
+ *  - high-level helpers (`applyManifest`, list methods);
+ *  - the raw API clients (`getK8sApi`, `getAppsApi`, `getCustomApi`, ...)
+ *    so other services (Istio watcher, CRD manager, service discovery)
+ *    can issue bespoke calls without each creating their own client.
+ *
+ * Connection mode is governed by `K8S_IN_CLUSTER`:
+ *  - `true`  → loads the pod's service-account config (production path).
+ *  - `false` → loads the default kubeconfig (developer workstation).
  */
 @Injectable()
 export class K8sService implements OnModuleInit {
@@ -21,12 +30,18 @@ export class K8sService implements OnModuleInit {
 
   constructor(private configService: ConfigService) {}
 
+  /**
+   * Nest lifecycle hook — triggered after the module is instantiated.
+   * Initializes the K8s client so later route/event handlers can rely on it.
+   */
   async onModuleInit() {
     await this.initializeClient();
   }
 
   /**
-   * Initialize Kubernetes client
+   * Load kubeconfig (in-cluster or default), instantiate the typed API
+   * clients, and confirm connectivity. Any failure here re-throws so the
+   * pod crashes rather than silently running without K8s access.
    */
   private async initializeClient() {
     this.kc = new k8s.KubeConfig();
@@ -35,24 +50,20 @@ export class K8sService implements OnModuleInit {
 
     try {
       if (this.inCluster) {
-        // Running inside a Kubernetes pod
         this.kc.loadFromCluster();
         this.logger.log(
           '✅ Loaded Kubernetes config from cluster (ServiceAccount)',
         );
       } else {
-        // Running locally, use kubeconfig
         this.kc.loadFromDefault();
         this.logger.log('✅ Loaded Kubernetes config from kubeconfig');
       }
 
-      // Initialize API clients
       this.k8sApi = this.kc.makeApiClient(k8s.CoreV1Api);
       this.appsApi = this.kc.makeApiClient(k8s.AppsV1Api);
       this.customApi = this.kc.makeApiClient(k8s.CustomObjectsApi);
       this.networkingApi = this.kc.makeApiClient(k8s.NetworkingV1Api);
 
-      // Test connection
       await this.testConnection();
     } catch (error) {
       this.logger.error(
@@ -64,7 +75,8 @@ export class K8sService implements OnModuleInit {
   }
 
   /**
-   * Test cluster connectivity
+   * Hit the API server with a cheap discovery call to confirm the
+   * credentials and network path are good. Called once from `onModuleInit`.
    */
   private async testConnection() {
     try {
@@ -82,7 +94,17 @@ export class K8sService implements OnModuleInit {
   }
 
   /**
-   * Apply a manifest (YAML) to the cluster
+   * Apply (create or update) a YAML manifest to the cluster.
+   *
+   * Currently supports the Istio security/networking kinds that the policy
+   * builder emits: `AuthorizationPolicy`, `PeerAuthentication`,
+   * `RequestAuthentication`, `DestinationRule`. Other kinds raise an error
+   * rather than being silently ignored.
+   *
+   * @param yamlContent Raw YAML string to apply.
+   * @param appliedBy  User id recorded in the audit trail.
+   * @returns Summary of the applied object (kind/name/namespace + audit metadata).
+   * @throws Error when the manifest is malformed or the kind is unsupported.
    */
   async applyManifest(yamlContent: string, appliedBy: string): Promise<any> {
     try {
@@ -139,11 +161,14 @@ export class K8sService implements OnModuleInit {
   }
 
   /**
-   * Apply Istio AuthorizationPolicy
+   * Upsert an Istio `AuthorizationPolicy` custom resource.
+   *
+   * Uses merge-patch semantics on update so unrelated fields (e.g. status
+   * added by controllers) are preserved.
    */
   private async applyAuthorizationPolicy(manifest: any, namespace: string) {
     try {
-      // Try to get existing policy
+      // Probe for an existing object; swallow the 404 by catching.
       const existing = await this.customApi
         .getNamespacedCustomObject(
           'security.istio.io',
@@ -155,7 +180,6 @@ export class K8sService implements OnModuleInit {
         .catch(() => null);
 
       if (existing) {
-        // Update existing
         return await this.customApi.patchNamespacedCustomObject(
           'security.istio.io',
           'v1beta1',
@@ -169,7 +193,6 @@ export class K8sService implements OnModuleInit {
           { headers: { 'Content-Type': 'application/merge-patch+json' } },
         );
       } else {
-        // Create new
         return await this.customApi.createNamespacedCustomObject(
           'security.istio.io',
           'v1beta1',
@@ -187,7 +210,7 @@ export class K8sService implements OnModuleInit {
   }
 
   /**
-   * Apply Istio PeerAuthentication
+   * Upsert an Istio `PeerAuthentication` custom resource (controls mTLS mode).
    */
   private async applyPeerAuthentication(manifest: any, namespace: string) {
     try {
@@ -230,7 +253,7 @@ export class K8sService implements OnModuleInit {
   }
 
   /**
-   * Apply Istio RequestAuthentication
+   * Upsert an Istio `RequestAuthentication` custom resource (JWT validation config).
    */
   private async applyRequestAuthentication(manifest: any, namespace: string) {
     try {
@@ -275,7 +298,7 @@ export class K8sService implements OnModuleInit {
   }
 
   /**
-   * Apply Istio DestinationRule
+   * Upsert an Istio `DestinationRule` custom resource (traffic-policy config).
    */
   private async applyDestinationRule(manifest: any, namespace: string) {
     try {
@@ -318,7 +341,10 @@ export class K8sService implements OnModuleInit {
   }
 
   /**
-   * Get all namespaces
+   * List every namespace visible to the service account.
+   *
+   * @returns Array of namespace names (namespaces with no `metadata.name` are
+   *          filtered out — defensive against partial API responses).
    */
   async getNamespaces(): Promise<string[]> {
     try {
@@ -333,7 +359,10 @@ export class K8sService implements OnModuleInit {
   }
 
   /**
-   * Get all pods in a namespace
+   * List pods in a namespace.
+   *
+   * @param namespace Target namespace (defaults to `default`).
+   * @returns Raw `V1Pod` objects, or `[]` on error.
    */
   async getPods(namespace: string = 'default') {
     try {
@@ -346,7 +375,10 @@ export class K8sService implements OnModuleInit {
   }
 
   /**
-   * Get all deployments in a namespace
+   * List deployments in a namespace.
+   *
+   * @param namespace Target namespace (defaults to `default`).
+   * @returns Raw `V1Deployment` objects, or `[]` on error.
    */
   async getDeployments(namespace: string = 'default') {
     try {
@@ -359,7 +391,10 @@ export class K8sService implements OnModuleInit {
   }
 
   /**
-   * Get all services in a namespace
+   * List services in a namespace.
+   *
+   * @param namespace Target namespace (defaults to `default`).
+   * @returns Raw `V1Service` objects, or `[]` on error.
    */
   async getServices(namespace: string = 'default') {
     try {
@@ -371,25 +406,27 @@ export class K8sService implements OnModuleInit {
     }
   }
 
-  /**
-   * Expose API clients for other services
-   */
+  /** Accessor for `CoreV1Api` (pods, services, namespaces, ...). */
   getK8sApi() {
     return this.k8sApi;
   }
 
+  /** Accessor for `AppsV1Api` (deployments, statefulsets, ...). */
   getAppsApi() {
     return this.appsApi;
   }
 
+  /** Accessor for `CustomObjectsApi` (CRDs — Istio resources, Zentrion CRDs). */
   getCustomApi() {
     return this.customApi;
   }
 
+  /** Accessor for `NetworkingV1Api` (NetworkPolicies, Ingress, ...). */
   getNetworkingApi() {
     return this.networkingApi;
   }
 
+  /** Accessor for the underlying `KubeConfig` (needed by the log watcher). */
   getKubeConfig() {
     return this.kc;
   }

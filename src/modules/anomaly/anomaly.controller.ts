@@ -2,11 +2,22 @@ import { Controller, Get, Param, Query, UseGuards } from '@nestjs/common';
 import { AnomalyService } from './anomaly.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 
+/**
+ * Anomaly HTTP API (`/anomalies`).
+ *
+ * Read-only — anomalies are written only by the background detector loop.
+ * All routes are JWT-protected.
+ */
 @Controller('anomalies')
 @UseGuards(JwtAuthGuard)
 export class AnomalyController {
   constructor(private anomalyService: AnomalyService) {}
 
+  /**
+   * `GET /anomalies` — latest anomalies across all services.
+   *
+   * @param limit Optional page size (defaults to service-side default).
+   */
   @Get()
   async getAllAnomalies(@Query('limit') limit?: string) {
     const parsedLimit = limit ? parseInt(limit, 10) : undefined;
@@ -16,6 +27,9 @@ export class AnomalyController {
     };
   }
 
+  /**
+   * `GET /anomalies/service/:service` — anomalies scoped to one service.
+   */
   @Get('service/:service')
   async getAnomaliesByService(@Param('service') service: string) {
     return {
@@ -25,6 +39,9 @@ export class AnomalyController {
     };
   }
 
+  /**
+   * `GET /anomalies/:id` — single anomaly by its `anomalyId` UUID.
+   */
   @Get(':id')
   async getAnomaly(@Param('id') id: string) {
     return {

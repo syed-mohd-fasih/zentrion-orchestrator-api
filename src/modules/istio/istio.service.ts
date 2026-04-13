@@ -6,13 +6,27 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { PassThrough } from 'stream';
 
 /**
- * Istio Telemetry Service
- * Watches Envoy access logs from Istio sidecars
+ * Istio telemetry watcher.
+ *
+ * Produces Zentrion's telemetry stream by tailing `istio-proxy` container
+ * logs from every pod in the monitored namespaces. Each parsed access log
+ * line is emitted on the internal event bus as `telemetry.log`, where the
+ * telemetry service persists it to Postgres and the anomaly engine picks
+ * it up.
+ *
+ * Lifecycle:
+ *  - `onModuleInit`    — starts watchers for each monitored namespace.
+ *  - `onModuleDestroy` — aborts every pod watcher and closes every log stream.
+ *
+ * The service also watches for newly created sidecar pods so freshly-
+ * deployed workloads are picked up without a pod restart.
  */
 @Injectable()
 export class IstioService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(IstioService.name);
+  /** Per-namespace K8s `Watch` handles (used so we can abort on shutdown). */
   private watchers: Map<string, any> = new Map();
+  /** Active log streams keyed by `namespace/podName`. */
   private logStreams: Map<string, any> = new Map();
 
   constructor(
@@ -21,6 +35,9 @@ export class IstioService implements OnModuleInit, OnModuleDestroy {
     private eventEmitter: EventEmitter2,
   ) {}
 
+  /**
+   * Start watching immediately on module init unless telemetry is disabled.
+   */
   async onModuleInit() {
     const enabled = this.configService.get('ISTIO_TELEMETRY_ENABLED', 'true') === 'true';
     if (enabled) {
@@ -28,17 +45,19 @@ export class IstioService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  /** Graceful shutdown — stop every open watcher/stream. */
   onModuleDestroy() {
     this.stopWatching();
   }
 
   /**
-   * Start watching Envoy access logs across all namespaces
+   * Bootstrap all watchers: resolve the target namespaces and spin up a
+   * watch+log-tail per namespace.
    */
   private async startWatchingTelemetry() {
     try {
       const namespaces = await this.getMonitoredNamespaces();
-      
+
       this.logger.log(`Starting Istio telemetry watch for namespaces: ${namespaces.join(', ')}`);
 
       for (const namespace of namespaces) {
@@ -52,13 +71,16 @@ export class IstioService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Get list of namespaces to monitor
+   * Resolve which namespaces to monitor.
+   *
+   * - `K8S_WATCH_NAMESPACES=all` → every namespace except `kube-*` and
+   *   `istio-system` (we don't want control-plane noise in telemetry).
+   * - otherwise a comma-separated list of explicit namespaces.
    */
   private async getMonitoredNamespaces(): Promise<string[]> {
     const watchNamespaces = this.configService.get('K8S_WATCH_NAMESPACES', 'all');
 
     if (watchNamespaces === 'all') {
-      // Watch all namespaces except kube-system and istio-system
       const allNamespaces = await this.k8sService.getNamespaces();
       return allNamespaces.filter(
         (ns) => !['kube-system', 'kube-public', 'kube-node-lease', 'istio-system'].includes(ns),
@@ -69,16 +91,19 @@ export class IstioService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Watch a specific namespace for pod logs
+   * Set up log tailing for every running sidecar pod in a namespace, then
+   * install a pod watcher so future pods are picked up automatically.
+   *
+   * @param namespace Namespace to monitor.
    */
   private async watchNamespace(namespace: string) {
     try {
       const k8sApi = this.k8sService.getK8sApi();
       const kc = this.k8sService.getKubeConfig();
 
-      // Get all pods in this namespace and filter for Istio sidecar
       const podsResponse = await k8sApi.listNamespacedPod(namespace);
 
+      // Only pods that have an `istio-proxy` sidecar and are currently running.
       const pods = podsResponse.body.items.filter((pod) => {
         const hasProxy = pod.spec?.containers?.some((c) => c.name === 'istio-proxy');
         const isRunning = pod.status?.phase === 'Running';
@@ -87,7 +112,6 @@ export class IstioService implements OnModuleInit, OnModuleDestroy {
 
       this.logger.log(`Found ${pods.length} pods with Istio sidecar in namespace ${namespace}`);
 
-      // Watch each pod's istio-proxy container logs
       for (const pod of pods) {
         const podName = pod.metadata?.name;
         if (!podName) continue;
@@ -95,7 +119,6 @@ export class IstioService implements OnModuleInit, OnModuleDestroy {
         await this.watchPodLogs(namespace, podName, kc);
       }
 
-      // Set up watcher for new pods in this namespace
       this.setupPodWatcher(namespace);
 
     } catch (error) {
@@ -104,18 +127,26 @@ export class IstioService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Watch logs from istio-proxy container in a pod
+   * Tail the `istio-proxy` container logs of a single pod and push each
+   * non-empty line through `processEnvoyLog`.
+   *
+   * Uses a `PassThrough` so chunk boundaries don't split log lines in half;
+   * any trailing partial line is held in `buffer` until the next chunk.
+   *
+   * @param namespace Pod namespace.
+   * @param podName   Pod name.
+   * @param kc        Active kubeconfig (passed in rather than re-fetched).
    */
   private async watchPodLogs(namespace: string, podName: string, kc: k8s.KubeConfig) {
     const streamKey = `${namespace}/${podName}`;
 
-    // Don't re-watch if already streaming
+    // Guard against double-watching when `setupPodWatcher` fires MODIFIED
+    // events for pods we're already tailing.
     if (this.logStreams.has(streamKey)) return;
 
     try {
       const logApi = new k8s.Log(kc);
 
-      // Use a PassThrough stream to capture log output
       const passThrough = new PassThrough();
 
       await logApi.log(
@@ -132,12 +163,12 @@ export class IstioService implements OnModuleInit, OnModuleDestroy {
         { follow: true, tailLines: 0, pretty: false, timestamps: false },
       );
 
-      // Parse and emit log lines from the PassThrough stream
       let buffer = '';
 
       passThrough.on('data', (chunk: Buffer) => {
         buffer += chunk.toString();
         const lines = buffer.split('\n');
+        // Last element is the (possibly incomplete) trailing fragment — hold it.
         buffer = lines.pop() || '';
 
         for (const line of lines) {
@@ -166,24 +197,22 @@ export class IstioService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Parse and emit Envoy access log
+   * Parse an Envoy access log line (JSON first, then text fallback) and
+   * publish a `telemetry.log` event carrying the parsed fields plus the
+   * emitting pod identity.
    */
   private processEnvoyLog(line: string, namespace: string, podName: string) {
     try {
-      // Envoy logs can be in JSON format (if configured)
-      // Try to parse as JSON first
       let logData;
-      
+
       try {
         logData = JSON.parse(line);
       } catch {
-        // If not JSON, try to parse text format
         logData = this.parseEnvoyTextLog(line);
       }
 
       if (!logData) return;
 
-      // Emit telemetry event
       this.eventEmitter.emit('telemetry.log', {
         ...logData,
         namespace,
@@ -196,12 +225,20 @@ export class IstioService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Parse Envoy text format log
-   * Example: [2025-01-15T10:30:45.123Z] "GET /productpage HTTP/1.1" 200 - "-" "-" 0 4183 127 125 "-" "curl/7.64.1" "abc-123" "productpage:9080" "10.244.0.15:9080"
+   * Parse the default Envoy text access-log format.
+   *
+   * Example line:
+   *   [2025-01-15T10:30:45.123Z] "GET /productpage HTTP/1.1" 200 - "-" ...
+   *
+   * Only a handful of fields are extracted — enough to drive anomaly
+   * detection. Extend the regex if more fields are needed.
+   *
+   * @param line Raw log line.
+   * @returns An object with `timestamp`, `method`, `path`, `protocol`,
+   *          and `status`, or `null` if the line doesn't match.
    */
   private parseEnvoyTextLog(line: string): any | null {
     try {
-      // Simple regex to extract key fields
       const match = line.match(
         /\[([^\]]+)\] "(\w+) ([^ ]+) ([^"]+)" (\d+) /
       );
@@ -223,15 +260,18 @@ export class IstioService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Setup watcher for new pods in namespace
+   * Install a `Watch` on the pod list of a namespace so new sidecar pods
+   * (from rollouts, scale-ups) begin tailing automatically.
+   *
+   * @param namespace Namespace to watch.
    */
   private setupPodWatcher(namespace: string) {
     try {
       const kc = this.k8sService.getKubeConfig();
       const watch = new k8s.Watch(kc);
-      
+
       const path = `/api/v1/namespaces/${namespace}/pods`;
-      
+
       const watcher = watch.watch(
         path,
         {},
@@ -263,12 +303,12 @@ export class IstioService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Stop all watchers and streams
+   * Close every open log stream and abort every pod watcher.
+   * Called from `onModuleDestroy` to keep shutdown clean.
    */
   private stopWatching() {
     this.logger.log('Stopping all telemetry watchers...');
 
-    // Close all log streams
     for (const [key, stream] of this.logStreams.entries()) {
       try {
         stream.destroy();
@@ -279,7 +319,6 @@ export class IstioService implements OnModuleInit, OnModuleDestroy {
     }
     this.logStreams.clear();
 
-    // Abort all watchers
     for (const [namespace, watcher] of this.watchers.entries()) {
       try {
         watcher.abort();

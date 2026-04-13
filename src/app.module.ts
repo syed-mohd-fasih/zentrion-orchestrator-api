@@ -24,6 +24,23 @@ import { HealthController } from './health.controller';
 // Configuration
 import appConfig from './config/app.config';
 
+/**
+ * Root application module.
+ *
+ * Wires up every feature module of the orchestrator:
+ *  - `ConfigModule` — global, loads `appConfig` plus `.env.local` / `.env`.
+ *  - `EventEmitterModule` — in-process pub/sub used to decouple the Istio
+ *    watcher from the telemetry/anomaly pipelines.
+ *  - `ScheduleModule` — cron/interval jobs (anomaly detection loop).
+ *  - `DatabaseModule` — TypeORM + PostgreSQL connection and entity registration.
+ *  - Infrastructure modules (`K8sModule`, `IstioModule`, `CrdModule`,
+ *    `ServiceDiscoveryModule`) — integrate with the cluster.
+ *  - Core domain modules (`AuthModule`, `TelemetryModule`, `AnomalyModule`,
+ *    `PolicyModule`) — authentication and the detect→draft→approve→apply flow.
+ *
+ * The only controller registered here is `HealthController`; every other HTTP
+ * route lives inside its owning feature module.
+ */
 @Module({
   imports: [
     // Global configuration

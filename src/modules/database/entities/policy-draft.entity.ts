@@ -1,5 +1,14 @@
 import { Entity, Column, PrimaryGeneratedColumn, CreateDateColumn, Index } from 'typeorm';
 
+/**
+ * `policy_drafts` table — Istio AuthorizationPolicy manifests awaiting review.
+ *
+ * A draft is created automatically when an anomaly meets the severity
+ * threshold, or manually by an admin. It carries the full YAML manifest
+ * (`yamlContent`) plus workflow fields (`status`, `approvedBy`, `rejectedBy`,
+ * `appliedAt`). Once approved and applied, the manifest is pushed to the
+ * cluster and the row's `status` flips to `applied`.
+ */
 @Entity('policy_drafts')
 @Index(['status'])
 @Index(['service'])

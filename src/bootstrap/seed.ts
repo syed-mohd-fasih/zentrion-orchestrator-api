@@ -6,8 +6,15 @@ import * as bcrypt from 'bcrypt';
 const logger = new Logger('SeedData');
 
 /**
- * Seed initial data into database
- * Called during application bootstrap
+ * Seed initial data into the database.
+ *
+ * Called once during application bootstrap (see `main.ts`). Ensures the
+ * default admin/analyst/viewer accounts exist so the dashboard has something
+ * to log in with on a fresh deployment. Safe to run repeatedly — each seeding
+ * step checks for existing records before inserting.
+ *
+ * @param app Initialized Nest application (provides access to the TypeORM `DataSource`).
+ * @throws Re-throws any error encountered so bootstrap fails loudly instead of silently.
  */
 export async function seedData(app: INestApplication) {
   logger.log('Seeding initial data...');
@@ -15,12 +22,12 @@ export async function seedData(app: INestApplication) {
   try {
     const dataSource = app.get(DataSource);
 
-    // Wait for database connection
+    // Defensive: TypeORM should already be initialized by NestJS, but if the
+    // data source is somehow uninitialized, bring it up before seeding.
     if (!dataSource.isInitialized) {
       await dataSource.initialize();
     }
 
-    // Seed users
     await seedUsers(dataSource);
 
     logger.log('✅ Seed data complete');
@@ -31,7 +38,13 @@ export async function seedData(app: INestApplication) {
 }
 
 /**
- * Seed default users
+ * Seed the three default user accounts.
+ *
+ * Inserts `admin`, `analyst`, and `viewer` users with bcrypt-hashed passwords
+ * if they do not already exist. The plaintext defaults are intentional
+ * demo/FYP credentials and MUST be rotated before any real deployment.
+ *
+ * @param dataSource Initialized TypeORM `DataSource`.
  */
 async function seedUsers(dataSource: DataSource) {
   const userRepository = dataSource.getRepository(User);
@@ -58,7 +71,6 @@ async function seedUsers(dataSource: DataSource) {
   ];
 
   for (const userData of users) {
-    // Check if user already exists
     const existing = await userRepository.findOne({
       where: { username: userData.username },
     });
@@ -67,7 +79,8 @@ async function seedUsers(dataSource: DataSource) {
       const user = new User();
       user.username = userData.username;
 
-      // Hash password
+      // Hash with a cost factor of 10 (bcrypt default trade-off between
+      // security and seed-time performance on modest hardware).
       const salt = await bcrypt.genSalt(10);
       user.passwordHash = await bcrypt.hash(userData.password, salt);
 

@@ -14,9 +14,22 @@ import { AuthorizationRule } from '../../common/types';
 import { K8sService } from '../k8s/k8s.service';
 import { buildAuthorizationPolicy } from '../k8s/istio.builder';
 
+/**
+ * Policy lifecycle service.
+ *
+ * Orchestrates the full detect → draft → approve → apply flow:
+ *  1. A draft is created (manually or auto-generated from an anomaly).
+ *  2. An admin approves it; `K8sService.applyManifest` pushes the YAML.
+ *  3. Every transition is recorded in `PolicyHistory` for audit.
+ *
+ * Approval is the single atomic boundary — if the K8s apply throws, the
+ * draft stays `pending` so the operator can retry after fixing the
+ * underlying cluster issue.
+ */
 @Injectable()
 export class PolicyService {
   private readonly logger = new Logger(PolicyService.name);
+  /** Optional WebSocket emitter registered by the gateway. */
   private eventEmitter: ((event: string, data: any) => void) | null = null;
 
   constructor(
@@ -29,10 +42,21 @@ export class PolicyService {
     private k8sService: K8sService,
   ) {}
 
+  /** Register the WebSocket emitter (wired up by `TelemetryGateway`). */
   setEventEmitter(emitter: (event: string, data: any) => void) {
     this.eventEmitter = emitter;
   }
 
+  /**
+   * Auto-generate a `DENY` policy draft from an anomaly.
+   *
+   * Resolves the anomaly from its public `anomalyId`, derives suitable
+   * authorization rules from its type (see `generateRulesFromAnomaly`),
+   * assembles the YAML via the builder, persists the draft, and emits a
+   * `policy.draft` event for the dashboard.
+   *
+   * @throws `NotFoundException` if the anomaly is unknown.
+   */
   async generatePolicyFromAnomaly(anomalyId: string, userId: string): Promise<PolicyDraft> {
     const anomaly = await this.anomalyRepo.findOne({ where: { anomalyId } });
     if (!anomaly) throw new NotFoundException(`Anomaly ${anomalyId} not found`);
@@ -66,6 +90,13 @@ export class PolicyService {
     return draft;
   }
 
+  /**
+   * Manually create a draft from a user-supplied rule set.
+   *
+   * Takes the same shape as the anomaly-driven path but lets operators
+   * craft bespoke policies (e.g. ad-hoc zero-trust baselining) without
+   * needing an anomaly to attach it to.
+   */
   async createDraft(params: {
     service: string;
     namespace: string;
@@ -95,6 +126,16 @@ export class PolicyService {
     return draft;
   }
 
+  /**
+   * Approve a pending draft and apply the manifest to the cluster.
+   *
+   * The DB write happens AFTER the cluster apply returns successfully so
+   * a failed apply does not mark the draft as `applied`. Two history
+   * entries are appended: `approved` (intent) and `applied` (result).
+   *
+   * @throws `NotFoundException` if the draft id is unknown.
+   * @throws `BadRequestException` if the draft isn't in `pending` state.
+   */
   async approveDraft(draftId: string, userId: string): Promise<PolicyDraft> {
     const draft = await this.draftRepo.findOne({ where: { draftId } });
     if (!draft) throw new NotFoundException(`Policy draft ${draftId} not found`);
@@ -102,6 +143,7 @@ export class PolicyService {
       throw new BadRequestException(`Policy draft is already ${draft.status}`);
     }
 
+    // Push to the cluster first — if this throws, the draft stays `pending`.
     const result = await this.k8sService.applyManifest(draft.yamlContent, userId);
 
     draft.status = 'applied';
@@ -120,6 +162,12 @@ export class PolicyService {
     return draft;
   }
 
+  /**
+   * Reject a pending draft with a required reason.
+   *
+   * @throws `NotFoundException` if unknown.
+   * @throws `BadRequestException` if not `pending`.
+   */
   async rejectDraft(draftId: string, userId: string, reason: string): Promise<PolicyDraft> {
     const draft = await this.draftRepo.findOne({ where: { draftId } });
     if (!draft) throw new NotFoundException(`Policy draft ${draftId} not found`);
@@ -138,22 +186,31 @@ export class PolicyService {
     return draft;
   }
 
+  /** Return every draft, most recently created first. */
   async getAllDrafts(): Promise<PolicyDraft[]> {
     return this.draftRepo.find({ order: { createdAt: 'DESC' } });
   }
 
+  /** Return only drafts still awaiting review. */
   async getPendingDrafts(): Promise<PolicyDraft[]> {
     return this.draftRepo.find({ where: { status: 'pending' }, order: { createdAt: 'DESC' } });
   }
 
+  /** Return drafts whose status is `applied` — i.e., policies live in-cluster. */
   async getActivePolicies(): Promise<PolicyDraft[]> {
     return this.draftRepo.find({ where: { status: 'applied' }, order: { appliedAt: 'DESC' } });
   }
 
+  /** Fetch a draft by its public `draftId` UUID. */
   async getDraft(id: string): Promise<PolicyDraft | null> {
     return this.draftRepo.findOne({ where: { draftId: id } });
   }
 
+  /**
+   * Return audit-trail rows, optionally scoped to a single policy id.
+   *
+   * @param policyId Optional `draftId` filter.
+   */
   async getHistory(policyId?: string): Promise<PolicyHistory[]> {
     if (policyId) {
       return this.historyRepo.find({ where: { policyId }, order: { timestamp: 'DESC' } });
@@ -161,6 +218,13 @@ export class PolicyService {
     return this.historyRepo.find({ order: { timestamp: 'DESC' } });
   }
 
+  /**
+   * Append a row to the `PolicyHistory` audit trail.
+   *
+   * Private because every state transition must go through the dedicated
+   * methods above — direct history inserts would bypass the validation
+   * those methods perform.
+   */
   private async addHistory(
     policyId: string,
     action: string,
@@ -175,16 +239,27 @@ export class PolicyService {
     await this.historyRepo.save(history);
   }
 
+  /**
+   * Translate an anomaly into a minimal `AuthorizationRule` set.
+   *
+   * This is the "template-based policy generation" called out in CLAUDE.md
+   * as an explicit FYP scope boundary — an ML model would replace this
+   * method in future work. Rules are intentionally broad (`methods: ['*']`
+   * for IP-based anomalies) so the generated policy is a safe starting
+   * point that the analyst can then narrow before approving.
+   */
   private generateRulesFromAnomaly(anomaly: Anomaly): AuthorizationRule[] {
     switch (anomaly.type) {
       case 'UNUSUAL_SOURCE':
       case 'SUSPICIOUS_PATTERN': {
+        // Pull the offending IP out of the anomaly's `details` string.
         const ipMatch = anomaly.details.match(/(\d+\.\d+\.\d+\.\d+)/);
         const ip = ipMatch ? ipMatch[1] : '192.0.2.0/24';
         return [{ from: { source: { ipBlocks: [ip] } }, to: { operation: { methods: ['*'] } } }];
       }
 
       case 'UNEXPECTED_COMMUNICATION': {
+        // Extract the offending source workload from the "A -> B" details.
         const match = anomaly.details.match(/(\S+)\s*->\s*(\S+)/);
         const sourceService = match ? match[1] : 'unknown';
         return [
@@ -196,6 +271,7 @@ export class PolicyService {
       }
 
       case 'NEW_ENDPOINT': {
+        // Pin down the sensitive path that was hit.
         const pathMatch = anomaly.details.match(/(\/[\w/-]+)/);
         const path = pathMatch ? pathMatch[1] : '/api/*';
         return [{ to: { operation: { paths: [path], methods: ['GET', 'POST'] } } }];
@@ -204,6 +280,7 @@ export class PolicyService {
       case 'HIGH_ERROR_RATE':
       case 'UNAUTHORIZED_ACCESS':
       default:
+        // Fallback: deny common write-ish methods; analyst narrows before approval.
         return [{ to: { operation: { methods: ['GET', 'POST', 'PUT', 'DELETE'] } } }];
     }
   }

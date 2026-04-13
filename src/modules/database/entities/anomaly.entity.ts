@@ -1,5 +1,16 @@
 import { Entity, Column, PrimaryGeneratedColumn, CreateDateColumn, Index } from 'typeorm';
 
+/**
+ * `anomalies` table — one row per detected anomaly.
+ *
+ * Produced by the anomaly detection service (rule-based detectors operating
+ * over `TelemetryLog`). Mirrored into `AnomalyRecord` CRDs so the anomaly is
+ * visible both in the dashboard and via `kubectl get anomalyrecords`.
+ *
+ * Indexed by `service`, `type`, `severity`, and `timestamp` because those
+ * are the common dashboard filters (and drive the severity-based policy
+ * auto-generation threshold).
+ */
 @Entity('anomalies')
 @Index(['service'])
 @Index(['type'])

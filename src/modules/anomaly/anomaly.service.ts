@@ -7,20 +7,40 @@ import { TelemetryLog } from '../database/entities/telemetry-log.entity';
 import { AnomalyType, AnomalySeverity } from '../../common/types';
 import { v4 as uuidv4 } from 'uuid';
 
+/**
+ * Rule-based anomaly detection engine.
+ *
+ * Runs on an interval (`anomaly.detectionIntervalMs`, default 5s), pulls
+ * the most recent telemetry window from Postgres, and runs eight detectors
+ * over it:
+ *   1. UNUSUAL_SOURCE          — traffic from a known-bad IP.
+ *   2. UNEXPECTED_COMMUNICATION — service→service edges outside the whitelist.
+ *   3. NEW_ENDPOINT            — hits on sensitive paths (`/admin`, `/.env`, ...).
+ *   4. HIGH_ERROR_RATE         — >20% 4xx/5xx over a window.
+ *   5. TRAFFIC_SPIKE           — recent RPS ≫ windowed baseline.
+ *   6. SUSPICIOUS_PATTERN      — single-IP burst (>30 requests).
+ *   7. LATENCY_ANOMALY         — recent latency ≫ windowed mean.
+ *   8. UNAUTHORIZED_ACCESS     — >5 401/403 responses.
+ *
+ * Each detector returns at most one `Anomaly` per tick to avoid flooding
+ * the dashboard. Future work replaces these rules with ML models (see
+ * "Future Work" in `CLAUDE.md`).
+ */
 @Injectable()
 export class AnomalyService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(AnomalyService.name);
   private detectionInterval: NodeJS.Timeout;
+  /** Optional callback registered by `TelemetryGateway` for real-time push. */
   private eventEmitter: ((event: string, data: any) => void) | null = null;
 
-  // Known suspicious IPs (used for UNUSUAL_SOURCE detection)
+  /** IPs that immediately trigger `UNUSUAL_SOURCE` on any request. */
   private readonly SUSPICIOUS_IPS = new Set([
     '192.0.2.1',
     '198.51.100.42',
     '203.0.113.99',
   ]);
 
-  // Known allowed service-to-service communications
+  /** Allow-list of known service-to-service edges. */
   private readonly KNOWN_COMMUNICATIONS = new Set([
     'frontend->api-gateway',
     'api-gateway->auth-service',
@@ -38,20 +58,30 @@ export class AnomalyService implements OnModuleInit, OnModuleDestroy {
     private configService: ConfigService,
   ) {}
 
+  /** Start the detection loop when the module is ready. */
   onModuleInit() {
     this.startDetection();
   }
 
+  /** Stop the interval on shutdown so tests/pods exit cleanly. */
   onModuleDestroy() {
     if (this.detectionInterval) {
       clearInterval(this.detectionInterval);
     }
   }
 
+  /**
+   * Wire in the WebSocket emitter callback (called by the gateway).
+   * When set, each newly saved anomaly is also broadcast live.
+   */
   setEventEmitter(emitter: (event: string, data: any) => void) {
     this.eventEmitter = emitter;
   }
 
+  /**
+   * Kick off the periodic `runDetection` loop.
+   * Interval is controlled via `anomaly.detectionIntervalMs` config.
+   */
   private startDetection() {
     const interval = this.configService.get<number>('anomaly.detectionIntervalMs', 5000);
     this.detectionInterval = setInterval(() => {
@@ -62,6 +92,12 @@ export class AnomalyService implements OnModuleInit, OnModuleDestroy {
     this.logger.log(`Anomaly detection started (interval: ${interval}ms)`);
   }
 
+  /**
+   * Single detection pass: load the last-5-minutes window (capped at 200
+   * rows for performance) and run every detector against it. Each detector
+   * is isolated in its own try/catch so one failing rule cannot starve the
+   * others.
+   */
   private async runDetection() {
     const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
 
@@ -101,6 +137,11 @@ export class AnomalyService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  /**
+   * Detector #1: flag requests originating from IPs on the suspicious list.
+   * Only scans the 50 most recent logs — enough to keep the dashboard
+   * responsive without spending detection time re-walking history.
+   */
   private detectUnusualSource(logs: TelemetryLog[]): Anomaly | null {
     for (const log of logs.slice(0, 50)) {
       if (this.SUSPICIOUS_IPS.has(log.sourceIp)) {
@@ -116,6 +157,11 @@ export class AnomalyService implements OnModuleInit, OnModuleDestroy {
     return null;
   }
 
+  /**
+   * Detector #2: flag service→service edges not in `KNOWN_COMMUNICATIONS`.
+   * Captures lateral movement where an attacker compromises one service
+   * and pivots to another it shouldn't normally talk to.
+   */
   private detectUnexpectedCommunication(logs: TelemetryLog[]): Anomaly | null {
     for (const log of logs.slice(0, 50)) {
       if (log.destService) {
@@ -134,8 +180,12 @@ export class AnomalyService implements OnModuleInit, OnModuleDestroy {
     return null;
   }
 
+  /**
+   * Detector #3: flag requests to sensitive paths (`/admin`, `/.env`,
+   * `/config`). A 404 is considered benign (scan bouncing off a missing
+   * handler) — anything else is suspicious.
+   */
   private detectNewEndpoint(logs: TelemetryLog[]): Anomaly | null {
-    // Without static baselines for real services, flag paths with unusual patterns
     for (const log of logs.slice(0, 50)) {
       const isAdminPath = log.path.includes('/admin') || log.path.includes('/.env') || log.path.includes('/config');
       if (isAdminPath && log.status !== 404) {
@@ -151,6 +201,11 @@ export class AnomalyService implements OnModuleInit, OnModuleDestroy {
     return null;
   }
 
+  /**
+   * Detector #4: per-service error rate > 20% over the window. Requires
+   * at least 10 samples so freshly-deployed services don't trip the rule
+   * on a handful of start-up errors.
+   */
   private detectHighErrorRate(logs: TelemetryLog[]): Anomaly | null {
     const serviceGroups = this.groupByService(logs);
 
@@ -172,6 +227,11 @@ export class AnomalyService implements OnModuleInit, OnModuleDestroy {
     return null;
   }
 
+  /**
+   * Detector #5: traffic spike — recent 10s RPS > 3× the windowed baseline
+   * AND > 20 requests absolute (prevents low-volume services from tripping
+   * when a handful of requests arrive together).
+   */
   private detectTrafficSpike(logs: TelemetryLog[]): Anomaly | null {
     const serviceGroups = this.groupByService(logs);
 
@@ -179,6 +239,7 @@ export class AnomalyService implements OnModuleInit, OnModuleDestroy {
       const recentCount = serviceLogs.filter(
         (l) => l.timestamp.getTime() > Date.now() - 10_000,
       ).length;
+      // Rough baseline: window-total / 20 (the window is ~200s worth of logs).
       const baselineCount = serviceLogs.length / 20;
 
       if (recentCount > baselineCount * 3 && recentCount > 20) {
@@ -194,6 +255,10 @@ export class AnomalyService implements OnModuleInit, OnModuleDestroy {
     return null;
   }
 
+  /**
+   * Detector #6: single-IP burst. Any source IP emitting >30 requests in
+   * the window (≈5 min) is flagged — catches scanners and brute-force.
+   */
   private detectSuspiciousPattern(logs: TelemetryLog[]): Anomaly | null {
     const ipGroups = new Map<string, TelemetryLog[]>();
 
@@ -217,6 +282,11 @@ export class AnomalyService implements OnModuleInit, OnModuleDestroy {
     return null;
   }
 
+  /**
+   * Detector #7: latency regression. Compares the most recent 10 requests
+   * against the service's windowed mean; requires >3× increase and an
+   * absolute threshold of 200 ms to suppress noise on fast services.
+   */
   private detectLatencyAnomaly(logs: TelemetryLog[]): Anomaly | null {
     const serviceGroups = this.groupByService(logs);
 
@@ -240,6 +310,10 @@ export class AnomalyService implements OnModuleInit, OnModuleDestroy {
     return null;
   }
 
+  /**
+   * Detector #8: >5 401/403 responses in the window. Classic signal for
+   * credential-stuffing or token-scanning attacks.
+   */
   private detectUnauthorizedAccess(logs: TelemetryLog[]): Anomaly | null {
     const unauthorizedLogs = logs.slice(0, 50).filter((l) => l.status === 401 || l.status === 403);
 
@@ -255,6 +329,7 @@ export class AnomalyService implements OnModuleInit, OnModuleDestroy {
     return null;
   }
 
+  /** Bucket logs by `service` name. Shared helper across multiple detectors. */
   private groupByService(logs: TelemetryLog[]): Record<string, TelemetryLog[]> {
     return logs.reduce<Record<string, TelemetryLog[]>>((acc, log) => {
       acc[log.service] = acc[log.service] ?? [];
@@ -263,6 +338,10 @@ export class AnomalyService implements OnModuleInit, OnModuleDestroy {
     }, {});
   }
 
+  /**
+   * Construct a fresh `Anomaly` entity with a new UUID and current time.
+   * Centralised so all detectors produce uniformly-shaped rows.
+   */
   private buildAnomaly(params: {
     service: string;
     type: AnomalyType;
@@ -282,6 +361,7 @@ export class AnomalyService implements OnModuleInit, OnModuleDestroy {
     return anomaly;
   }
 
+  /** Return the `limit` most recent anomalies across all services. */
   async getAllAnomalies(limit = 100): Promise<Anomaly[]> {
     return this.anomalyRepo.find({
       order: { timestamp: 'DESC' },
@@ -289,10 +369,12 @@ export class AnomalyService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
+  /** Fetch an anomaly by its public `anomalyId` UUID (not the DB primary key). */
   async getAnomaly(id: string): Promise<Anomaly | null> {
     return this.anomalyRepo.findOne({ where: { anomalyId: id } });
   }
 
+  /** Return every anomaly for a given service, newest first. */
   async getAnomaliesByService(service: string): Promise<Anomaly[]> {
     return this.anomalyRepo.find({
       where: { service },

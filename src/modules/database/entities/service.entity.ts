@@ -1,5 +1,14 @@
 import { Entity, Column, PrimaryGeneratedColumn, CreateDateColumn, Index } from 'typeorm';
 
+/**
+ * `services` table — cluster services discovered by the service-discovery
+ * watcher.
+ *
+ * One row per K8s Deployment observed. `dependencies` is populated from
+ * telemetry (who-calls-whom) and `lastSeen` is bumped each time a deployment
+ * update or telemetry event references the service, letting the dashboard
+ * prune stale entries.
+ */
 @Entity('services')
 @Index(['name'])
 @Index(['namespace'])

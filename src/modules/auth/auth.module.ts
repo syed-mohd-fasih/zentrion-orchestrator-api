@@ -8,6 +8,18 @@ import { AuthService } from './auth.service';
 import { JwtStrategy } from './jwt.strategy';
 import { User } from '../database/entities/user.entity';
 
+/**
+ * Authentication module.
+ *
+ * Wires up JWT-based auth for the whole application:
+ *  - registers the `User` repository so `AuthService` / `JwtStrategy` can
+ *    look users up;
+ *  - installs Passport with the `jwt` strategy as the default;
+ *  - configures `JwtModule` with secret + expiry from `ConfigService`.
+ *
+ * Re-exports the providers other modules need (`AuthService` for imperative
+ * checks, `JwtStrategy`/`PassportModule` for guards on other controllers).
+ */
 @Module({
   imports: [
     TypeOrmModule.forFeature([User]),

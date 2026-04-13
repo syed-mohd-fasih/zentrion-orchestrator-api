@@ -18,11 +18,23 @@ import {
   GeneratePolicyFromAnomalyDto,
 } from './policy.dto';
 
+/**
+ * Policy lifecycle HTTP API (`/policies`).
+ *
+ * Routes are split by required role:
+ *  - `VIEWER`           — read-only list/detail routes.
+ *  - `ANALYST`+`ADMIN`  — create and reject drafts.
+ *  - `ADMIN`            — approve drafts (which applies them to the cluster).
+ *
+ * Approval is the only action that actually mutates cluster state; every
+ * state change is mirrored into `PolicyHistory` for auditing.
+ */
 @Controller('policies')
 @UseGuards(JwtAuthGuard)
 export class PolicyController {
   constructor(private policyService: PolicyService) {}
 
+  /** `GET /policies/active` — list policies currently applied in the cluster. */
   @Get('active')
   async getActivePolicies() {
     return {
@@ -31,6 +43,7 @@ export class PolicyController {
     };
   }
 
+  /** `GET /policies/drafts/pending` — drafts still awaiting human review. */
   @Get('drafts/pending')
   async getPendingDrafts() {
     return {
@@ -39,6 +52,7 @@ export class PolicyController {
     };
   }
 
+  /** `GET /policies/drafts` — every draft across all lifecycle states. */
   @Get('drafts')
   async getAllDrafts() {
     return {
@@ -47,6 +61,7 @@ export class PolicyController {
     };
   }
 
+  /** `GET /policies/history` — audit trail across every policy. */
   @Get('history')
   async getPolicyHistory() {
     return {
@@ -55,6 +70,7 @@ export class PolicyController {
     };
   }
 
+  /** `GET /policies/history/:policyId` — audit trail for a single policy. */
   @Get('history/:policyId')
   async getPolicyHistoryById(@Param('policyId') policyId: string) {
     return {
@@ -64,6 +80,10 @@ export class PolicyController {
     };
   }
 
+  /**
+   * `GET /policies/drafts/:id` — fetch a single draft.
+   * @throws `NotFoundException` when the id doesn't match any draft.
+   */
   @Get('drafts/:id')
   async getDraft(@Param('id') id: string) {
     const draft = await this.policyService.getDraft(id);
@@ -76,6 +96,10 @@ export class PolicyController {
     };
   }
 
+  /**
+   * `POST /policies/drafts` — manually create a new draft.
+   * Restricted to ADMIN + ANALYST.
+   */
   @Post('drafts')
   @UseGuards(RolesGuard)
   @Roles('ADMIN', 'ANALYST')
@@ -90,6 +114,10 @@ export class PolicyController {
     };
   }
 
+  /**
+   * `POST /policies/drafts/from-anomaly` — auto-generate a draft in
+   * response to a specific anomaly id. Restricted to ADMIN + ANALYST.
+   */
   @Post('drafts/from-anomaly')
   @UseGuards(RolesGuard)
   @Roles('ADMIN', 'ANALYST')
@@ -107,6 +135,11 @@ export class PolicyController {
     };
   }
 
+  /**
+   * `POST /policies/drafts/:id/approve` — approve and apply a draft.
+   * Restricted to ADMIN because this is the only route that mutates the
+   * cluster's live security posture.
+   */
   @Post('drafts/:id/approve')
   @UseGuards(RolesGuard)
   @Roles('ADMIN')
@@ -122,6 +155,10 @@ export class PolicyController {
     };
   }
 
+  /**
+   * `POST /policies/drafts/:id/reject` — reject a draft with a reason.
+   * Restricted to ADMIN + ANALYST.
+   */
   @Post('drafts/:id/reject')
   @UseGuards(RolesGuard)
   @Roles('ADMIN', 'ANALYST')

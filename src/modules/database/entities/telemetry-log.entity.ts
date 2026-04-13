@@ -1,5 +1,14 @@
 import { Entity, Column, PrimaryGeneratedColumn, CreateDateColumn, Index } from 'typeorm';
 
+/**
+ * `telemetry_logs` table — individual request records parsed from Envoy
+ * access logs.
+ *
+ * This is the high-volume table that the anomaly engine scans. `sourceIp`
+ * uses the Postgres `inet` type for efficient IP filtering, and the four
+ * indexes (`service`, `timestamp`, `status`, `source`) cover the detector
+ * queries (per-service windows, error-rate scans, source enumeration).
+ */
 @Entity('telemetry_logs')
 @Index(['service'])
 @Index(['timestamp'])
