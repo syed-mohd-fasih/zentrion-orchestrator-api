@@ -17,6 +17,7 @@ import { ServiceDiscoveryModule } from './modules/service-discovery/service-disc
 import { TelemetryModule } from './modules/telemetry/telemetry.module';
 import { AnomalyModule } from './modules/anomaly/anomaly.module';
 import { PolicyModule } from './modules/policy/policy.module';
+import { SettingsModule } from './modules/settings/settings.module';
 
 // Health check
 import { HealthController } from './health.controller';
@@ -78,6 +79,7 @@ import appConfig from './config/app.config';
     TelemetryModule, // Telemetry processing
     AnomalyModule, // Anomaly detection
     PolicyModule, // Policy management
+    SettingsModule, // System settings + AI toggle
   ],
   controllers: [HealthController],
 })

@@ -3,6 +3,7 @@ import {
   Logger,
   NotFoundException,
   BadRequestException,
+  Optional,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -13,6 +14,9 @@ import { Anomaly } from '../database/entities/anomaly.entity';
 import { AuthorizationRule } from '../../common/types';
 import { K8sService } from '../k8s/k8s.service';
 import { buildAuthorizationPolicy } from '../k8s/istio.builder';
+import { LlmService, LlmPolicyResponse } from './llm.service';
+import { SandboxService, SandboxResult } from './sandbox.service';
+import { SettingsService } from '../settings/settings.service';
 
 /**
  * Policy lifecycle service.
@@ -40,6 +44,9 @@ export class PolicyService {
     @InjectRepository(Anomaly)
     private anomalyRepo: Repository<Anomaly>,
     private k8sService: K8sService,
+    @Optional() private llmService: LlmService,
+    @Optional() private sandboxService: SandboxService,
+    @Optional() private settingsService: SettingsService,
   ) {}
 
   /** Register the WebSocket emitter (wired up by `TelemetryGateway`). */
@@ -82,12 +89,63 @@ export class PolicyService {
     await this.draftRepo.save(draft);
     await this.addHistory(draft.draftId, 'created', userId, 'Policy draft created from anomaly');
 
+    // Fire-and-forget: generate LLM explanation asynchronously (does not block response).
+    if (this.llmService) {
+      this.triggerLlmExplanation(draft.draftId, anomaly).catch((err: Error) =>
+        this.logger.warn(`LLM explanation failed for draft ${draft.draftId}: ${err.message}`),
+      );
+    }
+
     if (this.eventEmitter) {
       this.eventEmitter('policy.draft', draft);
     }
 
     this.logger.log(`Policy draft created: ${draft.draftId} for service ${draft.service}`);
     return draft;
+  }
+
+  private async triggerLlmExplanation(draftId: string, anomaly: Anomaly) {
+    const draft = await this.draftRepo.findOne({ where: { draftId } });
+    if (!draft || !this.llmService) return;
+
+    const prompt = this.llmService.buildAnomalyPrompt(
+      anomaly.type,
+      anomaly.details,
+      draft.yamlContent,
+    );
+    const result = await this.llmService.generate(prompt);
+    if (result) {
+      draft.llmExplanation = JSON.stringify(result);
+      await this.draftRepo.save(draft);
+      this.logger.log(`LLM explanation saved for draft ${draftId}`);
+    }
+  }
+
+  async simulateDraft(draftId: string, windowHours?: number): Promise<SandboxResult> {
+    if (!this.sandboxService) {
+      throw new BadRequestException('Sandbox service is not available');
+    }
+    const draft = await this.draftRepo.findOne({ where: { draftId } });
+    if (!draft) throw new NotFoundException(`Policy draft ${draftId} not found`);
+
+    const anomaly = draft.anomalyId
+      ? await this.anomalyRepo.findOne({ where: { anomalyId: draft.anomalyId } })
+      : null;
+    const anomalyLogIds = anomaly?.associatedLogs ?? [];
+
+    const hours = windowHours ?? this.settingsService?.getSandboxWindowHours() ?? 24;
+    return this.sandboxService.simulateDraft(draftId, hours, anomalyLogIds);
+  }
+
+  async getExplanation(draftId: string): Promise<LlmPolicyResponse | null> {
+    const draft = await this.draftRepo.findOne({ where: { draftId } });
+    if (!draft) throw new NotFoundException(`Policy draft ${draftId} not found`);
+    if (!draft.llmExplanation) return null;
+    try {
+      return JSON.parse(draft.llmExplanation) as LlmPolicyResponse;
+    } catch {
+      return null;
+    }
   }
 
   /**

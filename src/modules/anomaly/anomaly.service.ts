@@ -1,4 +1,4 @@
-import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
+import { Injectable, OnModuleInit, OnModuleDestroy, Logger, Optional } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, MoreThan } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
@@ -6,6 +6,8 @@ import { Anomaly } from '../database/entities/anomaly.entity';
 import { TelemetryLog } from '../database/entities/telemetry-log.entity';
 import { AnomalyType, AnomalySeverity } from '../../common/types';
 import { v4 as uuidv4 } from 'uuid';
+import { AiDetectionService } from './ai-detection.service';
+import { SettingsService } from '../settings/settings.service';
 
 /**
  * Rule-based anomaly detection engine.
@@ -56,6 +58,8 @@ export class AnomalyService implements OnModuleInit, OnModuleDestroy {
     @InjectRepository(TelemetryLog)
     private logRepo: Repository<TelemetryLog>,
     private configService: ConfigService,
+    @Optional() private aiDetectionService: AiDetectionService,
+    @Optional() private settingsService: SettingsService,
   ) {}
 
   /** Start the detection loop when the module is ready. */
@@ -92,13 +96,51 @@ export class AnomalyService implements OnModuleInit, OnModuleDestroy {
     this.logger.log(`Anomaly detection started (interval: ${interval}ms)`);
   }
 
-  /**
-   * Single detection pass: load the last-5-minutes window (capped at 200
-   * rows for performance) and run every detector against it. Each detector
-   * is isolated in its own try/catch so one failing rule cannot starve the
-   * others.
-   */
   private async runDetection() {
+    const mode = this.settingsService?.getDetectionMode() ?? 'rules';
+    if (mode === 'ai' && this.aiDetectionService) {
+      await this.runAiDetection();
+    } else {
+      await this.runRuleDetection();
+    }
+  }
+
+  private async runAiDetection() {
+    const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
+    const recentLogs = await this.logRepo.find({
+      where: { timestamp: MoreThan(fiveMinutesAgo) },
+      order: { timestamp: 'DESC' },
+      take: 200,
+    });
+    if (recentLogs.length === 0) return;
+
+    const results = await this.aiDetectionService.detect(recentLogs);
+    if (!results) return;
+
+    const threshold = this.settingsService?.getAiConfidenceThreshold() ?? 0.7;
+
+    for (const result of results) {
+      if (result.confidence < threshold) continue;
+      const pct = Math.round(result.confidence * 100);
+      const anomaly = this.buildAnomaly({
+        service: result.service,
+        type: result.anomalyType as AnomalyType,
+        severity: result.confidence >= 0.9 ? 'high' : result.confidence >= 0.7 ? 'medium' : 'low',
+        details: `[AI ${pct}%] ${result.details}`,
+        associatedLogs: recentLogs
+          .filter((l) => l.service === result.service)
+          .slice(0, 5)
+          .map((l) => l.id),
+      });
+      await this.anomalyRepo.save(anomaly);
+      this.logger.warn(`AI anomaly detected: ${anomaly.type} on ${anomaly.service} (${pct}%)`);
+      if (this.eventEmitter) {
+        this.eventEmitter('anomaly.created', anomaly);
+      }
+    }
+  }
+
+  private async runRuleDetection() {
     const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
 
     const recentLogs = await this.logRepo.find({
@@ -124,9 +166,9 @@ export class AnomalyService implements OnModuleInit, OnModuleDestroy {
       try {
         const anomaly = check();
         if (anomaly) {
+          anomaly.details = `[RULE] ${anomaly.details}`;
           await this.anomalyRepo.save(anomaly);
           this.logger.warn(`Anomaly detected: ${anomaly.type} on ${anomaly.service}`);
-
           if (this.eventEmitter) {
             this.eventEmitter('anomaly.created', anomaly);
           }

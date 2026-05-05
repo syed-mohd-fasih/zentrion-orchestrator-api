@@ -65,6 +65,15 @@ export default () => ({
     applyEnabled: process.env.POLICY_APPLY_ENABLED !== 'false',
   },
 
+  // --- AI services ---------------------------------------------------------
+  ai: {
+    ollamaHost: process.env.OLLAMA_HOST || 'ollama.zentrion-system.svc.cluster.local',
+    ollamaPort: parseInt(process.env.OLLAMA_PORT ?? '', 10) || 11434,
+    ollamaModel: process.env.OLLAMA_MODEL || 'qwen2.5:7b',
+    mlServiceHost: process.env.ML_SERVICE_HOST || 'host.minikube.internal',
+    mlServicePort: parseInt(process.env.ML_SERVICE_PORT ?? '', 10) || 8000,
+  },
+
   // --- Logging -------------------------------------------------------------
   logging: {
     level: process.env.LOG_LEVEL || 'info', // 'debug' | 'info' | 'warn' | 'error'

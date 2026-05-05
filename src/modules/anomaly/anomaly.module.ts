@@ -2,21 +2,15 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AnomalyService } from './anomaly.service';
 import { AnomalyController } from './anomaly.controller';
+import { AiDetectionService } from './ai-detection.service';
 import { Anomaly } from '../database/entities/anomaly.entity';
 import { TelemetryLog } from '../database/entities/telemetry-log.entity';
+import { SettingsModule } from '../settings/settings.module';
 
-/**
- * Anomaly detection module.
- *
- * Hosts the rule-based detection loop that scans recent `TelemetryLog` rows
- * and persists findings to the `anomalies` table. Exports `AnomalyService`
- * so `PolicyModule` can react to anomalies by auto-generating policy
- * drafts.
- */
 @Module({
-  imports: [TypeOrmModule.forFeature([Anomaly, TelemetryLog])],
+  imports: [TypeOrmModule.forFeature([Anomaly, TelemetryLog]), SettingsModule],
   controllers: [AnomalyController],
-  providers: [AnomalyService],
-  exports: [AnomalyService],
+  providers: [AnomalyService, AiDetectionService],
+  exports: [AnomalyService, AiDetectionService],
 })
 export class AnomalyModule {}

@@ -7,6 +7,7 @@ import { PolicyDraft } from './entities/policy-draft.entity';
 import { PolicyHistory } from './entities/policy-history.entity';
 import { Service } from './entities/service.entity';
 import { User } from './entities/user.entity';
+import { SystemSetting } from './entities/system-setting.entity';
 
 /**
  * Database module.
@@ -40,6 +41,7 @@ import { User } from './entities/user.entity';
           PolicyHistory,
           Service,
           User,
+          SystemSetting,
         ],
         synchronize: config.get('DB_SYNC', 'false') === 'true',
         logging: config.get('DB_LOGGING', false),
@@ -53,6 +55,7 @@ import { User } from './entities/user.entity';
       PolicyHistory,
       Service,
       User,
+      SystemSetting,
     ]),
   ],
   exports: [TypeOrmModule],

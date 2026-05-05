@@ -1,29 +1,34 @@
-import { Controller, Get } from '@nestjs/common';
+import { Controller, Get, Optional } from '@nestjs/common';
+import { LlmService } from './modules/policy/llm.service';
+import { AiDetectionService } from './modules/anomaly/ai-detection.service';
+import { SettingsService } from './modules/settings/settings.service';
 
-/**
- * Health-check controller.
- *
- * Exposes `GET /health` for Kubernetes liveness/readiness probes and for
- * external monitoring. The endpoint does not touch the database or any
- * downstream system — it only confirms the HTTP server is responsive.
- */
 @Controller('health')
 export class HealthController {
-  /**
-   * Returns a static health payload with timestamp, service name, and version.
-   *
-   * Intentionally cheap so probes stay fast and do not cascade failures from
-   * dependencies (DB, K8s API) into pod restarts.
-   *
-   * @returns Object with `status`, ISO `timestamp`, `service`, and `version`.
-   */
+  constructor(
+    @Optional() private llmService: LlmService,
+    @Optional() private aiDetectionService: AiDetectionService,
+    @Optional() private settingsService: SettingsService,
+  ) {}
+
   @Get()
-  check() {
+  async check() {
+    const [ollamaOk, mlOk] = await Promise.all([
+      this.llmService?.isAvailable().catch(() => false) ?? Promise.resolve(false),
+      this.aiDetectionService?.isAvailable().catch(() => false) ?? Promise.resolve(false),
+    ]);
+
     return {
       status: 'ok',
       timestamp: new Date().toISOString(),
       service: 'orchestrator-api',
       version: '1.0.0',
+      ai: {
+        detectionMode: this.settingsService?.getDetectionMode() ?? 'rules',
+        ollama: ollamaOk,
+        mlService: mlOk,
+        model: this.settingsService?.getLlmModel() ?? 'unknown',
+      },
     };
   }
 }

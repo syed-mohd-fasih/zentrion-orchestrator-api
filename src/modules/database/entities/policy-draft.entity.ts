@@ -55,4 +55,10 @@ export class PolicyDraft {
 
   @Column({ type: 'varchar', length: 255, nullable: true })
   anomalyId: string;
+
+  @Column({ type: 'text', nullable: true })
+  llmExplanation: string;
+
+  @Column({ type: 'jsonb', nullable: true })
+  sandboxResult: Record<string, any>;
 }

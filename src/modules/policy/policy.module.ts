@@ -2,26 +2,23 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { PolicyService } from './policy.service';
 import { PolicyController } from './policy.controller';
+import { LlmService } from './llm.service';
+import { SandboxService } from './sandbox.service';
 import { K8sModule } from '../k8s/k8s.module';
 import { PolicyDraft } from '../database/entities/policy-draft.entity';
 import { PolicyHistory } from '../database/entities/policy-history.entity';
 import { Anomaly } from '../database/entities/anomaly.entity';
+import { TelemetryLog } from '../database/entities/telemetry-log.entity';
+import { SettingsModule } from '../settings/settings.module';
 
-/**
- * Policy lifecycle module.
- *
- * Binds the draft/approve/reject controller and the service that owns the
- * full workflow — draft persistence, history, YAML generation, and
- * cluster application via `K8sModule`. Needs the `Anomaly` repository
- * because drafts are frequently auto-generated from anomalies.
- */
 @Module({
   imports: [
-    TypeOrmModule.forFeature([PolicyDraft, PolicyHistory, Anomaly]),
+    TypeOrmModule.forFeature([PolicyDraft, PolicyHistory, Anomaly, TelemetryLog]),
     K8sModule,
+    SettingsModule,
   ],
   controllers: [PolicyController],
-  providers: [PolicyService],
-  exports: [PolicyService],
+  providers: [PolicyService, LlmService, SandboxService],
+  exports: [PolicyService, LlmService],
 })
 export class PolicyModule {}

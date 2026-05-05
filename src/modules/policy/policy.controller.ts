@@ -4,6 +4,7 @@ import {
   Post,
   Param,
   Body,
+  Query,
   UseGuards,
   Request,
   NotFoundException,
@@ -78,6 +79,29 @@ export class PolicyController {
       policyId,
       timestamp: new Date().toISOString(),
     };
+  }
+
+  /** `GET /policies/drafts/:id/explain` — fetch the LLM explanation for a draft (404 if not ready). */
+  @Get('drafts/:id/explain')
+  async getExplanation(@Param('id') id: string) {
+    const explanation = await this.policyService.getExplanation(id);
+    if (!explanation) {
+      throw new NotFoundException(`No LLM explanation available for draft ${id} yet`);
+    }
+    return { explanation, timestamp: new Date().toISOString() };
+  }
+
+  /** `POST /policies/drafts/:id/simulate` — run sandbox simulation against historical traffic. */
+  @Post('drafts/:id/simulate')
+  @UseGuards(RolesGuard)
+  @Roles('ADMIN', 'ANALYST')
+  async simulateDraft(
+    @Param('id') id: string,
+    @Query('windowHours') windowHours?: string,
+  ) {
+    const wh = windowHours ? parseInt(windowHours, 10) : undefined;
+    const result = await this.policyService.simulateDraft(id, wh);
+    return { result, timestamp: new Date().toISOString() };
   }
 
   /**
