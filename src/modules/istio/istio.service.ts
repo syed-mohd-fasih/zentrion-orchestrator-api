@@ -104,8 +104,10 @@ export class IstioService implements OnModuleInit, OnModuleDestroy {
       const podsResponse = await k8sApi.listNamespacedPod(namespace);
 
       // Only pods that have an `istio-proxy` sidecar and are currently running.
+      // istio-proxy may be a native sidecar (initContainer with restartPolicy:Always, Istio 1.22+)
       const pods = podsResponse.body.items.filter((pod) => {
-        const hasProxy = pod.spec?.containers?.some((c) => c.name === 'istio-proxy');
+        const hasProxy = pod.spec?.containers?.some((c) => c.name === 'istio-proxy')
+          || pod.spec?.initContainers?.some((c) => c.name === 'istio-proxy');
         const isRunning = pod.status?.phase === 'Running';
         return hasProxy && isRunning;
       });
@@ -277,7 +279,8 @@ export class IstioService implements OnModuleInit, OnModuleDestroy {
         {},
         (type, pod: k8s.V1Pod) => {
           if (type === 'ADDED' || type === 'MODIFIED') {
-            const hasProxy = pod.spec?.containers?.some((c) => c.name === 'istio-proxy');
+            const hasProxy = pod.spec?.containers?.some((c) => c.name === 'istio-proxy')
+              || pod.spec?.initContainers?.some((c) => c.name === 'istio-proxy');
             if (hasProxy && pod.status?.phase === 'Running') {
               const podName = pod.metadata?.name;
               if (podName && !this.logStreams.has(`${namespace}/${podName}`)) {
