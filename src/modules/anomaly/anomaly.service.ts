@@ -403,6 +403,25 @@ export class AnomalyService implements OnModuleInit, OnModuleDestroy {
     return anomaly;
   }
 
+  /** Mark an anomaly as resolved. */
+  async resolveAnomaly(id: string): Promise<Anomaly> {
+    const anomaly = await this.anomalyRepo.findOne({ where: { anomalyId: id } });
+    if (!anomaly) throw new Error(`Anomaly ${id} not found`);
+    anomaly.resolved = true;
+    anomaly.resolvedAt = new Date();
+    return this.anomalyRepo.save(anomaly);
+  }
+
+  /** Mark an anomaly as a false positive (resolved + flagged in metadata). */
+  async whitelistAnomaly(id: string): Promise<Anomaly> {
+    const anomaly = await this.anomalyRepo.findOne({ where: { anomalyId: id } });
+    if (!anomaly) throw new Error(`Anomaly ${id} not found`);
+    anomaly.resolved = true;
+    anomaly.resolvedAt = new Date();
+    anomaly.metadata = { ...(anomaly.metadata ?? {}), falsePositive: true };
+    return this.anomalyRepo.save(anomaly);
+  }
+
   /** Return the `limit` most recent anomalies across all services. */
   async getAllAnomalies(limit = 100): Promise<Anomaly[]> {
     return this.anomalyRepo.find({

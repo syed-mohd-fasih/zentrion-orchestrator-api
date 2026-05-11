@@ -162,6 +162,17 @@ export interface AuthorizationRule {
 }
 
 // ---------------------------------------------------------------------------
+// Policy chat
+// ---------------------------------------------------------------------------
+
+/** One turn in the AI assistant chat for a policy draft. */
+export interface ChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: string;
+}
+
+// ---------------------------------------------------------------------------
 // Users / auth
 // ---------------------------------------------------------------------------
 

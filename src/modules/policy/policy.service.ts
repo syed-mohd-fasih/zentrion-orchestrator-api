@@ -6,15 +6,15 @@ import {
   Optional,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, MoreThan } from 'typeorm';
 import { v4 as uuidv4 } from 'uuid';
 import { PolicyDraft } from '../database/entities/policy-draft.entity';
 import { PolicyHistory } from '../database/entities/policy-history.entity';
 import { Anomaly } from '../database/entities/anomaly.entity';
-import { AuthorizationRule } from '../../common/types';
+import { AuthorizationRule, ChatMessage } from '../../common/types';
 import { K8sService } from '../k8s/k8s.service';
 import { buildAuthorizationPolicy } from '../k8s/istio.builder';
-import { LlmService, LlmPolicyResponse } from './llm.service';
+import { LlmService, LlmPolicyResponse, ComplianceScore } from './llm.service';
 import { SandboxService, SandboxResult } from './sandbox.service';
 import { SettingsService } from '../settings/settings.service';
 
@@ -48,6 +48,9 @@ export class PolicyService {
     @Optional() private sandboxService: SandboxService,
     @Optional() private settingsService: SettingsService,
   ) {}
+
+  private complianceCache: { value: ComplianceScore; cachedAt: number } | null = null;
+  private readonly COMPLIANCE_CACHE_TTL_MS = 5 * 60 * 1000;
 
   /** Register the WebSocket emitter (wired up by `TelemetryGateway`). */
   setEventEmitter(emitter: (event: string, data: any) => void) {
@@ -104,6 +107,8 @@ export class PolicyService {
     return draft;
   }
 
+  private readonly inflightExplanations = new Map<string, Promise<LlmPolicyResponse | null>>();
+
   private async triggerLlmExplanation(draftId: string, anomaly: Anomaly) {
     const draft = await this.draftRepo.findOne({ where: { draftId } });
     if (!draft || !this.llmService) return;
@@ -119,6 +124,28 @@ export class PolicyService {
       await this.draftRepo.save(draft);
       this.logger.log(`LLM explanation saved for draft ${draftId}`);
     }
+  }
+
+  private async generateExplanationForDraft(draftId: string): Promise<LlmPolicyResponse | null> {
+    const draft = await this.draftRepo.findOne({ where: { draftId } });
+    if (!draft || !this.llmService) return null;
+    const anomaly = draft.anomalyId
+      ? await this.anomalyRepo.findOne({ where: { anomalyId: draft.anomalyId } })
+      : null;
+    if (!anomaly) return null;
+
+    const prompt = this.llmService.buildAnomalyPrompt(
+      anomaly.type,
+      anomaly.details,
+      draft.yamlContent,
+    );
+    const result = await this.llmService.generate(prompt);
+    if (result) {
+      draft.llmExplanation = JSON.stringify(result);
+      await this.draftRepo.save(draft);
+      this.logger.log(`LLM explanation backfilled for draft ${draftId}`);
+    }
+    return result;
   }
 
   async simulateDraft(draftId: string, windowHours?: number): Promise<SandboxResult> {
@@ -137,15 +164,100 @@ export class PolicyService {
     return this.sandboxService.simulateDraft(draftId, hours, anomalyLogIds);
   }
 
+  async getChatHistory(draftId: string): Promise<ChatMessage[]> {
+    const draft = await this.draftRepo.findOne({ where: { draftId } });
+    if (!draft) throw new NotFoundException(`Policy draft ${draftId} not found`);
+    return draft.chatHistory ?? [];
+  }
+
+  async chatWithDraft(
+    draftId: string,
+    userMessage: string,
+    onToken: (t: string) => void,
+    onDone: (fullReply: string) => void,
+    onError: (e: Error) => void,
+  ): Promise<{ abort: () => void } | null> {
+    if (!this.llmService) {
+      onError(new Error('LLM service is not configured'));
+      return null;
+    }
+    const draft = await this.draftRepo.findOne({ where: { draftId } });
+    if (!draft) {
+      onError(new Error(`Policy draft ${draftId} not found`));
+      return null;
+    }
+    const anomaly = draft.anomalyId
+      ? await this.anomalyRepo.findOne({ where: { anomalyId: draft.anomalyId } })
+      : null;
+
+    const systemPrompt = this.llmService.buildChatSystemPrompt(
+      anomaly?.type ?? 'UNKNOWN',
+      anomaly?.details ?? 'No anomaly attached to this draft.',
+      draft.yamlContent,
+    );
+
+    const history: ChatMessage[] = draft.chatHistory ?? [];
+    const userTurn: ChatMessage = {
+      role: 'user',
+      content: userMessage,
+      timestamp: new Date().toISOString(),
+    };
+    const messagesForLlm = [...history, userTurn];
+
+    // Persist the user message before streaming starts so it survives mid-stream crashes.
+    draft.chatHistory = messagesForLlm;
+    await this.draftRepo.save(draft);
+
+    let accumulated = '';
+    const handle = this.llmService.chatStream(
+      systemPrompt,
+      messagesForLlm,
+      (token) => {
+        accumulated += token;
+        onToken(token);
+      },
+      () => {
+        const reply = accumulated.trim();
+        const assistantTurn: ChatMessage = {
+          role: 'assistant',
+          content: reply,
+          timestamp: new Date().toISOString(),
+        };
+        this.draftRepo
+          .findOne({ where: { draftId } })
+          .then((fresh) => {
+            if (!fresh) return;
+            fresh.chatHistory = [...(fresh.chatHistory ?? []), assistantTurn];
+            return this.draftRepo.save(fresh);
+          })
+          .catch((err) => this.logger.warn(`Failed to persist chat reply: ${(err as Error).message}`))
+          .finally(() => onDone(reply));
+      },
+      (err) => onError(err),
+    );
+    return handle;
+  }
+
   async getExplanation(draftId: string): Promise<LlmPolicyResponse | null> {
     const draft = await this.draftRepo.findOne({ where: { draftId } });
     if (!draft) throw new NotFoundException(`Policy draft ${draftId} not found`);
-    if (!draft.llmExplanation) return null;
-    try {
-      return JSON.parse(draft.llmExplanation) as LlmPolicyResponse;
-    } catch {
-      return null;
+    if (draft.llmExplanation) {
+      try {
+        return JSON.parse(draft.llmExplanation) as LlmPolicyResponse;
+      } catch {
+        // Fall through and regenerate.
+      }
     }
+
+    if (!this.llmService) return null;
+    const existing = this.inflightExplanations.get(draftId);
+    if (existing) return existing;
+
+    const promise = this.generateExplanationForDraft(draftId).finally(() => {
+      this.inflightExplanations.delete(draftId);
+    });
+    this.inflightExplanations.set(draftId, promise);
+    return promise;
   }
 
   /**
@@ -242,6 +354,42 @@ export class PolicyService {
 
     this.logger.log(`Policy ${draftId} rejected by ${userId}`);
     return draft;
+  }
+
+  /**
+   * Get a compliance score from the LLM based on current security metrics.
+   * Result is cached for 5 minutes to avoid hammering Ollama on every page load.
+   */
+  async getComplianceScore(): Promise<{ score: number | null; summary: string | null; cached: boolean }> {
+    if (this.complianceCache && Date.now() - this.complianceCache.cachedAt < this.COMPLIANCE_CACHE_TTL_MS) {
+      return { ...this.complianceCache.value, cached: true };
+    }
+
+    if (!this.llmService || !(await this.llmService.isAvailable())) {
+      return { score: null, summary: null, cached: false };
+    }
+
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const [activePolicies, unresolvedAnomalies, anomaliesLast7d, policiesApplied7d] = await Promise.all([
+      this.draftRepo.count({ where: { status: 'applied' } }),
+      this.anomalyRepo.count({ where: { resolved: false } }),
+      this.anomalyRepo.count({ where: { timestamp: MoreThan(sevenDaysAgo) } }),
+      this.draftRepo.count({ where: { status: 'applied', appliedAt: MoreThan(sevenDaysAgo) } }),
+    ]);
+
+    const result = await this.llmService.generateComplianceScore({
+      activePolicies,
+      unresolvedAnomalies,
+      anomaliesLast7d,
+      policiesApplied7d,
+    });
+
+    if (result) {
+      this.complianceCache = { value: result, cachedAt: Date.now() };
+      return { ...result, cached: false };
+    }
+
+    return { score: null, summary: null, cached: false };
   }
 
   /** Return every draft, most recently created first. */

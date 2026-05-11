@@ -1,4 +1,5 @@
 import { Entity, Column, PrimaryGeneratedColumn, CreateDateColumn, Index } from 'typeorm';
+import { ChatMessage } from '../../../common/types';
 
 /**
  * `policy_drafts` table — Istio AuthorizationPolicy manifests awaiting review.
@@ -61,4 +62,7 @@ export class PolicyDraft {
 
   @Column({ type: 'jsonb', nullable: true })
   sandboxResult: Record<string, any>;
+
+  @Column({ type: 'jsonb', nullable: true })
+  chatHistory: ChatMessage[] | null;
 }

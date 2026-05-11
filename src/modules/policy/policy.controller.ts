@@ -8,7 +8,10 @@ import {
   UseGuards,
   Request,
   NotFoundException,
+  Sse,
+  MessageEvent,
 } from '@nestjs/common';
+import { Observable, Subject } from 'rxjs';
 import { PolicyService } from './policy.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard, Roles } from '../auth/roles.guard';
@@ -34,6 +37,13 @@ import {
 @UseGuards(JwtAuthGuard)
 export class PolicyController {
   constructor(private policyService: PolicyService) {}
+
+  /** `GET /policies/compliance` — LLM-generated compliance score (cached 5 min). */
+  @Get('compliance')
+  async getComplianceScore() {
+    const result = await this.policyService.getComplianceScore();
+    return { ...result, timestamp: new Date().toISOString() };
+  }
 
   /** `GET /policies/active` — list policies currently applied in the cluster. */
   @Get('active')
@@ -81,12 +91,64 @@ export class PolicyController {
     };
   }
 
-  /** `GET /policies/drafts/:id/explain` — fetch the LLM explanation for a draft (404 if not ready). */
+  /** `GET /policies/drafts/:id/chat` — return the persisted chat history for a draft. */
+  @Get('drafts/:id/chat')
+  async getChat(@Param('id') id: string) {
+    return {
+      messages: await this.policyService.getChatHistory(id),
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  /** `POST /policies/drafts/:id/chat` — stream a chat reply via SSE. */
+  @Post('drafts/:id/chat')
+  @UseGuards(RolesGuard)
+  @Roles('ADMIN', 'ANALYST')
+  @Sse()
+  streamChat(
+    @Param('id') id: string,
+    @Body() body: { message: string },
+  ): Observable<MessageEvent> {
+    const subject = new Subject<MessageEvent>();
+    const message = (body?.message ?? '').toString().trim();
+    if (!message) {
+      setImmediate(() => {
+        subject.next({ data: { error: 'message is required' } });
+        subject.complete();
+      });
+      return subject.asObservable();
+    }
+
+    this.policyService
+      .chatWithDraft(
+        id,
+        message,
+        (token) => subject.next({ data: { token } }),
+        () => {
+          subject.next({ data: { done: true } });
+          subject.complete();
+        },
+        (err) => {
+          subject.next({ data: { error: err.message } });
+          subject.complete();
+        },
+      )
+      .catch((err: Error) => {
+        subject.next({ data: { error: err.message } });
+        subject.complete();
+      });
+
+    return subject.asObservable();
+  }
+
+  /** `GET /policies/drafts/:id/explain` — fetch the LLM explanation for a draft, generating it on-demand when missing. */
   @Get('drafts/:id/explain')
   async getExplanation(@Param('id') id: string) {
     const explanation = await this.policyService.getExplanation(id);
     if (!explanation) {
-      throw new NotFoundException(`No LLM explanation available for draft ${id} yet`);
+      throw new NotFoundException(
+        `No LLM explanation available for draft ${id} — the local model may be offline or still loading.`,
+      );
     }
     return { explanation, timestamp: new Date().toISOString() };
   }

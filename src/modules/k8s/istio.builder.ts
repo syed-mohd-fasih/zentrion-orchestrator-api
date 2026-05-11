@@ -114,10 +114,19 @@ export function buildPeerAuthentication(
  * @returns `true` when the value must be double-quoted.
  */
 function needsQuoting(value: string): boolean {
-  const yamlBooleans = ['true', 'false', 'yes', 'no', 'on', 'off', 'null'];
+  if (value === '') return true;
+  const yamlBooleans = ['true', 'false', 'yes', 'no', 'on', 'off', 'null', '~'];
   if (yamlBooleans.includes(value.toLowerCase())) return true;
   if (/^\d+(\.\d+)?$/.test(value)) return true;
+  // YAML treats colon-space, '#', leading indicators, and flow chars as syntax.
+  // Quote any value containing them so the output parses unambiguously.
+  if (/[:#,\[\]\{\}&*!|>'"%@`]/.test(value)) return true;
+  if (/^[\s\-?]/.test(value)) return true;
   return false;
+}
+
+function escapeForDoubleQuotedYaml(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
 /**
@@ -156,7 +165,7 @@ function convertToYAML(obj: any, indent = 0): string {
             // Drop the leading indent of the nested object so the `-` lines up.
             yaml += itemYaml.substring(indentStr.length + 2);
           } else if (typeof item === 'string' && needsQuoting(item)) {
-            yaml += `${indentStr}- "${item}"\n`;
+            yaml += `${indentStr}- "${escapeForDoubleQuotedYaml(item)}"\n`;
           } else {
             yaml += `${indentStr}- ${item}\n`;
           }
@@ -165,7 +174,7 @@ function convertToYAML(obj: any, indent = 0): string {
     } else if (typeof value === 'object') {
       yaml += '\n' + convertToYAML(value, indent + 1);
     } else if (typeof value === 'string' && needsQuoting(value)) {
-      yaml += ` "${value}"\n`;
+      yaml += ` "${escapeForDoubleQuotedYaml(value)}"\n`;
     } else {
       yaml += ` ${value}\n`;
     }
