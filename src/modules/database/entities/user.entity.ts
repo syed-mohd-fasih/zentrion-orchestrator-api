@@ -23,7 +23,10 @@ export class User {
   role: string;
 
   @Column({ type: 'varchar', length: 255, nullable: true })
-  email: string;
+  email: string | null;
+
+  @Column({ type: 'boolean', default: true })
+  firstLogin: boolean;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;

@@ -8,6 +8,7 @@ import { DatabaseModule } from './modules/database/database.module';
 
 // Core modules
 import { AuthModule } from './modules/auth/auth.module';
+import { UsersModule } from './modules/users/users.module';
 import { K8sModule } from './modules/k8s/k8s.module';
 import { IstioModule } from './modules/istio/istio.module';
 import { CrdModule } from './modules/crd/crd.module';
@@ -76,6 +77,7 @@ import appConfig from './config/app.config';
 
     // Core application modules
     AuthModule, // JWT authentication
+    UsersModule, // Admin user management (CRUD)
     TelemetryModule, // Telemetry processing
     AnomalyModule, // Anomaly detection
     PolicyModule, // Policy management

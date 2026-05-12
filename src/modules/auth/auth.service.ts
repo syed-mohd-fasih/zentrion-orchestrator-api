@@ -1,10 +1,17 @@
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import {
+  ConflictException,
+  Injectable,
+  NotFoundException,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, Not } from 'typeorm';
 import * as bcrypt from 'bcrypt';
 import { User } from '../database/entities/user.entity';
 import { JwtPayload } from '../../common/types';
+
+const BCRYPT_COST = 10;
 
 /**
  * Authentication service.
@@ -70,8 +77,89 @@ export class AuthService {
         username: user.username,
         role: user.role,
         email: user.email,
+        firstLogin: user.firstLogin,
       },
     };
+  }
+
+  /** Flip the first-login flag so the onboarding tour doesn't re-appear. */
+  async markTourCompleted(userId: string): Promise<void> {
+    await this.userRepo.update({ id: userId }, { firstLogin: false });
+  }
+
+  /**
+   * Self-edit profile fields (username + email). Role is intentionally
+   * NOT settable here — only `UsersService.update` (ADMIN-gated) can
+   * change roles.
+   *
+   * @throws `ConflictException` if the new username is already taken.
+   * @throws `NotFoundException` if the user disappeared.
+   */
+  async updateOwnProfile(
+    userId: string,
+    patch: { username?: string; email?: string | null },
+  ) {
+    const user = await this.userRepo.findOne({ where: { id: userId } });
+    if (!user) throw new NotFoundException(`User ${userId} not found`);
+
+    if (patch.username && patch.username !== user.username) {
+      const taken = await this.userRepo.findOne({
+        where: { username: patch.username, id: Not(userId) },
+      });
+      if (taken) {
+        throw new ConflictException(
+          `Username "${patch.username}" is already taken`,
+        );
+      }
+      user.username = patch.username;
+    }
+    if (patch.email !== undefined) {
+      user.email = patch.email || null;
+    }
+    await this.userRepo.save(user);
+
+    return {
+      id: user.id,
+      username: user.username,
+      role: user.role,
+      email: user.email,
+      firstLogin: user.firstLogin,
+    };
+  }
+
+  /**
+   * Change the caller's own password. Verifies the supplied current
+   * password against the stored hash before rotating.
+   */
+  async changeOwnPassword(
+    userId: string,
+    currentPassword: string,
+    newPassword: string,
+  ): Promise<void> {
+    const user = await this.userRepo.findOne({ where: { id: userId } });
+    if (!user) throw new NotFoundException(`User ${userId} not found`);
+
+    const valid = await bcrypt.compare(currentPassword, user.passwordHash);
+    if (!valid) throw new UnauthorizedException('Current password is incorrect');
+
+    const salt = await bcrypt.genSalt(BCRYPT_COST);
+    user.passwordHash = await bcrypt.hash(newPassword, salt);
+    await this.userRepo.save(user);
+
+    // Drop all existing sessions for this user so other devices have to
+    // re-authenticate with the new password.
+    this.clearSessionsForUser(userId);
+  }
+
+  /**
+   * Remove every entry in the in-memory `sessions` map whose userId
+   * matches. Used after admin-driven mutations (delete, reset password,
+   * role change) and self password change.
+   */
+  clearSessionsForUser(userId: string): void {
+    for (const [token, sessionUserId] of this.sessions.entries()) {
+      if (sessionUserId === userId) this.sessions.delete(token);
+    }
   }
 
   /**

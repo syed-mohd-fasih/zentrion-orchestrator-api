@@ -15,6 +15,20 @@ import { AuthorizationRule, ChatMessage } from '../../common/types';
 import { K8sService } from '../k8s/k8s.service';
 import { buildAuthorizationPolicy } from '../k8s/istio.builder';
 import { LlmService, LlmPolicyResponse, ComplianceScore } from './llm.service';
+
+function formatExplanationAsMarkdown(exp: LlmPolicyResponse): string {
+  const parts: string[] = [];
+  if (exp.explanation) parts.push(`**Explanation**\n${exp.explanation}`);
+  if (exp.severityReasoning) parts.push(`**Severity reasoning**\n${exp.severityReasoning}`);
+  if (exp.policyReasoning) parts.push(`**Policy reasoning**\n${exp.policyReasoning}`);
+  if (exp.estimatedImpact) parts.push(`**Estimated impact**\n${exp.estimatedImpact}`);
+  if (exp.alternatives?.length) {
+    parts.push(
+      `**Alternative approaches**\n${exp.alternatives.map((a) => `• ${a}`).join('\n')}`,
+    );
+  }
+  return parts.join('\n\n');
+}
 import { SandboxService, SandboxResult } from './sandbox.service';
 import { SettingsService } from '../settings/settings.service';
 
@@ -164,10 +178,64 @@ export class PolicyService {
     return this.sandboxService.simulateDraft(draftId, hours, anomalyLogIds);
   }
 
+  private readonly inflightChatSeed = new Map<string, Promise<ChatMessage[]>>();
+
   async getChatHistory(draftId: string): Promise<ChatMessage[]> {
     const draft = await this.draftRepo.findOne({ where: { draftId } });
     if (!draft) throw new NotFoundException(`Policy draft ${draftId} not found`);
-    return draft.chatHistory ?? [];
+    if (draft.chatHistory && draft.chatHistory.length > 0) return draft.chatHistory;
+
+    const existing = this.inflightChatSeed.get(draftId);
+    if (existing) return existing;
+    const promise = this.bootstrapChat(draftId).finally(() => {
+      this.inflightChatSeed.delete(draftId);
+    });
+    this.inflightChatSeed.set(draftId, promise);
+    return promise;
+  }
+
+  private async bootstrapChat(draftId: string): Promise<ChatMessage[]> {
+    const draft = await this.draftRepo.findOne({ where: { draftId } });
+    if (!draft) throw new NotFoundException(`Policy draft ${draftId} not found`);
+    if (draft.chatHistory && draft.chatHistory.length > 0) return draft.chatHistory;
+
+    let explanation: LlmPolicyResponse | null = null;
+    if (draft.llmExplanation) {
+      try {
+        explanation = JSON.parse(draft.llmExplanation) as LlmPolicyResponse;
+      } catch {
+        explanation = null;
+      }
+    }
+    if (!explanation) {
+      explanation = await this.generateExplanationForDraft(draftId);
+    }
+
+    if (!explanation) {
+      // LLM failed — return a transient placeholder without persisting, so the
+      // next open retries instead of being permanently stuck with the fallback.
+      return [
+        {
+          role: 'assistant',
+          content:
+            'I could not generate a structured explanation for this draft (the local model may be offline). You can still ask follow-up questions about it below.',
+          timestamp: new Date().toISOString(),
+        },
+      ];
+    }
+
+    const seed: ChatMessage = {
+      role: 'assistant',
+      content: formatExplanationAsMarkdown(explanation),
+      timestamp: new Date().toISOString(),
+    };
+
+    const fresh = await this.draftRepo.findOne({ where: { draftId } });
+    if (fresh) {
+      fresh.chatHistory = [seed, ...(fresh.chatHistory ?? [])];
+      await this.draftRepo.save(fresh);
+    }
+    return [seed];
   }
 
   async chatWithDraft(

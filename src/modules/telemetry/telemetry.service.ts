@@ -89,7 +89,10 @@ export class TelemetryService {
       .take(limit);
 
     if (service) {
-      query.where('log.service = :service', { service });
+      query.where('(log.service = :service OR log.service LIKE :prefix)', {
+        service,
+        prefix: `${service}-%`,
+      });
     }
 
     return query.getMany();
@@ -133,12 +136,20 @@ export class TelemetryService {
   private async computeServiceMetrics(service: string) {
     const oneHourAgo = new Date(Date.now() - 3_600_000);
 
+    // Match BOTH the bare deployment name ("details-v1") and any pod under
+    // that deployment ("details-v1-<rs-hash>-<pod-hash>"). The Istio
+    // watcher persists `log.service` from `data.pod` when no upstream
+    // service name is available — so the same logical service appears
+    // under multiple distinct strings in `telemetry_logs`.
     const result = await this.logRepo
       .createQueryBuilder('log')
       .select('COUNT(*)', 'total')
       .addSelect('SUM(CASE WHEN log.status >= 400 THEN 1 ELSE 0 END)', 'errors')
       .addSelect('AVG(log."latencyMs")', 'avgLatency')
-      .where('log.service = :service', { service })
+      .where('(log.service = :service OR log.service LIKE :prefix)', {
+        service,
+        prefix: `${service}-%`,
+      })
       .andWhere('log.timestamp > :since', { since: oneHourAgo })
       .getRawOne<{ total: string; errors: string; avgLatency: string }>();
 

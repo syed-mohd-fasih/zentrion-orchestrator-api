@@ -8,6 +8,7 @@ import {
   Controller,
   Post,
   Get,
+  Patch,
   Body,
   UseGuards,
   Request,
@@ -15,7 +16,7 @@ import {
 } from '@nestjs/common';
 import { AuthService } from './auth.service';
 import { JwtAuthGuard } from './jwt-auth.guard';
-import { IsString, IsNotEmpty } from 'class-validator';
+import { IsString, IsNotEmpty, IsOptional, MinLength, IsEmail, MaxLength } from 'class-validator';
 
 /**
  * Request body for `POST /auth/login`.
@@ -31,6 +32,27 @@ class LoginDto {
   @IsString()
   @IsNotEmpty()
   password: string;
+}
+
+class UpdateMeDto {
+  @IsOptional()
+  @IsString()
+  @MinLength(3)
+  @MaxLength(64)
+  username?: string;
+
+  @IsOptional()
+  @IsEmail()
+  email?: string;
+}
+
+class ChangePasswordDto {
+  @IsString()
+  currentPassword: string;
+
+  @IsString()
+  @MinLength(8)
+  newPassword: string;
 }
 
 /**
@@ -89,5 +111,46 @@ export class AuthController {
   async logout(@Request() req) {
     const token = req.headers.authorization?.replace('Bearer ', '');
     return this.authService.logout(token);
+  }
+
+  /**
+   * Mark the onboarding tour as completed for the authenticated user.
+   * The frontend calls this when the user finishes or skips the tour.
+   */
+  @Post('tour-completed')
+  @HttpCode(200)
+  @UseGuards(JwtAuthGuard)
+  async completeTour(@Request() req) {
+    await this.authService.markTourCompleted(req.user.id);
+    return { firstLogin: false };
+  }
+
+  /**
+   * Self-edit profile (username and/or email).
+   *
+   * Role is NOT acceptable here — admins must use `PATCH /users/:id`.
+   */
+  @Patch('me')
+  @HttpCode(200)
+  @UseGuards(JwtAuthGuard)
+  async updateMe(@Request() req, @Body() dto: UpdateMeDto) {
+    const user = await this.authService.updateOwnProfile(req.user.id, dto);
+    return { user };
+  }
+
+  /**
+   * Change the caller's own password. Requires verifying the current
+   * password before rotating.
+   */
+  @Post('me/password')
+  @HttpCode(200)
+  @UseGuards(JwtAuthGuard)
+  async changePassword(@Request() req, @Body() dto: ChangePasswordDto) {
+    await this.authService.changeOwnPassword(
+      req.user.id,
+      dto.currentPassword,
+      dto.newPassword,
+    );
+    return { ok: true };
   }
 }
